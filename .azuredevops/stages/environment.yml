@@ -1,0 +1,72 @@
+# One environment = a plan stage and an apply stage. Capacity name/resource group come from the
+# environment's tfvars (Terraform creates the capacity). The pipeline resumes it before the plan
+# and the apply (the Fabric provider refuses a paused capacity) and pauses it again afterwards.
+
+parameters:
+  - name: environment
+    type: string
+  - name: applyDependsOn
+    type: object
+    default: []
+
+stages:
+  - stage: Plan_${{ parameters.environment }}
+    displayName: Plan ${{ parameters.environment }}
+    dependsOn: []
+    variables:
+      - group: fabricvending-${{ parameters.environment }}
+    jobs:
+      - job: plan
+        steps:
+          - checkout: self
+          - template: ../steps/capacity.yml
+            parameters:
+              environment: ${{ parameters.environment }}
+              action: resume
+          - template: ../steps/terraform.yml
+            parameters:
+              environment: ${{ parameters.environment }}
+              command: plan
+          - template: ../steps/capacity.yml
+            parameters:
+              environment: ${{ parameters.environment }}
+              action: suspend
+          - publish: $(Build.SourcesDirectory)/tfplan
+            artifact: tfplan-${{ parameters.environment }}
+            displayName: Publish plan
+
+  - stage: Apply_${{ parameters.environment }}
+    displayName: Apply ${{ parameters.environment }}
+    dependsOn:
+      - Plan_${{ parameters.environment }}
+      - ${{ each dependency in parameters.applyDependsOn }}:
+          - ${{ dependency }}
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'))
+    variables:
+      - group: fabricvending-${{ parameters.environment }}
+    jobs:
+      - deployment: apply
+        environment: fabricvending-${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - bash: cp "$(Pipeline.Workspace)/tfplan-${{ parameters.environment }}/tfplan" "$(Build.SourcesDirectory)/tfplan"
+                  displayName: Stage saved plan
+
+                - template: ../steps/capacity.yml
+                  parameters:
+                    environment: ${{ parameters.environment }}
+                    action: resume
+
+                - template: ../steps/terraform.yml
+                  parameters:
+                    environment: ${{ parameters.environment }}
+                    command: apply
+
+                - template: ../steps/capacity.yml
+                  parameters:
+                    environment: ${{ parameters.environment }}
+                    action: suspend

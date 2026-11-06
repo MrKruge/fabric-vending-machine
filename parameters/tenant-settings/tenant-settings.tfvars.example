@@ -1,0 +1,26 @@
+# Fabric tenant settings managed by the tenant settings pipeline (tenant_settings/).
+# Copy to tenant-settings.tfvars. A change to that file triggers the tenant settings pipeline only.
+#
+# Start from your live tenant and keep only what you want governed:
+#   pwsh scripts/get-fabric-tenant-settings.ps1 -TenantId <tenant> -UseAzCli -OutputTfvars
+# Settings that are not listed are left alone. If an apply reports DependentTenantSettingUpdateBlocked,
+# the setting depends on a parent that is off (or a service such as Purview that is not configured):
+# comment that entry out.
+#
+# These three are what the pipeline's own service principal needs. Terraform refuses to turn them off.
+# delegated_to takes Entra group display names; the group below is created by bootstrap-identity.ps1.
+
+fabric_tenant_settings = {
+  "AllowServicePrincipalsUseReadAdminAPIs" = {
+    enabled      = true
+    delegated_to = ["grp-fabricvending-spns"]
+  }
+  "AllowServicePrincipalsUseWriteAdminAPIs" = {
+    enabled      = true
+    delegated_to = ["grp-fabricvending-spns"]
+  }
+  "ServicePrincipalAccessGlobalAPIs" = {
+    enabled      = true
+    delegated_to = ["grp-fabricvending-spns"]
+  }
+}

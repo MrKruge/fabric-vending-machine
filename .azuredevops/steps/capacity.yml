@@ -1,0 +1,21 @@
+# Resume or suspend the environment's Fabric capacity. The Fabric provider refuses to plan or apply
+# workspaces against a paused capacity, so plan and apply both bracket their work with this.
+# The logic lives in scripts/capacity.sh (shared with other CI systems and tested offline).
+
+parameters:
+  - name: environment
+    type: string
+  - name: action
+    type: string
+    values: [resume, suspend]
+
+steps:
+  - task: AzureCLI@2
+    displayName: ${{ parameters.action }} Fabric capacity (if it exists)
+    ${{ if eq(parameters.action, 'suspend') }}:
+      condition: always()
+    inputs:
+      azureSubscription: sc-fabricvending-azure-${{ parameters.environment }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: bash scripts/capacity.sh "${{ parameters.environment }}" "${{ parameters.action }}"

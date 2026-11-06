@@ -1,0 +1,53 @@
+# Offline checks: no Azure access needed. Also wired as a build-validation policy on main.
+
+trigger:
+  branches:
+    include: [main]
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - bash: bash scripts/install-terraform.sh 1.12.0
+    displayName: Install Terraform
+
+  - bash: terraform fmt -check -recursive
+    displayName: Format check
+
+  - bash: terraform init -backend=false
+    displayName: Init (no backend)
+
+  - bash: terraform validate
+    displayName: Validate
+
+  - bash: terraform test
+    displayName: Test (mocked providers, offline)
+
+  - bash: |
+      set -euo pipefail
+      cd tenant_settings
+      terraform fmt -check -recursive
+      terraform init -backend=false
+      terraform validate
+      terraform test
+    displayName: Tenant settings stack (offline)
+
+  - bash: for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done
+    displayName: Shell syntax check
+
+  - bash: bash tests/capacity-script.sh
+    displayName: Capacity script test (fake az, offline)
+
+  - pwsh: |
+      $failed = $false
+      foreach ($f in Get-ChildItem scripts/*.ps1) {
+        $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+        if ($errors) { $failed = $true; Write-Host "##vso[task.logissue type=error]$($f.Name): $($errors[0].Message)" }
+        else { Write-Host "ok $($f.Name)" }
+      }
+      if ($failed) { exit 1 }
+    displayName: PowerShell syntax check

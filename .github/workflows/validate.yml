@@ -1,0 +1,51 @@
+# Offline checks: no cloud access needed. Required status check for pull requests.
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.0"
+
+      - name: Workspaces stack
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false
+          terraform validate
+          terraform test
+
+      - name: Tenant settings stack
+        working-directory: tenant_settings
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false
+          terraform validate
+          terraform test
+
+      - name: Shell syntax and capacity script test
+        run: |
+          for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done
+          bash tests/capacity-script.sh
+
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in Get-ChildItem scripts/*.ps1) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+            if ($errors) { $failed = $true; Write-Host "::error file=scripts/$($f.Name)::$($errors[0].Message)" }
+          }
+          if ($failed) { exit 1 }

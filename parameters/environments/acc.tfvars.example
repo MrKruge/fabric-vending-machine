@@ -1,0 +1,27 @@
+# ── Environment: ACC ──────────────────────────────────────────────────────────
+# Copy to acc.tfvars and fill in. Maps to the UAT stage. Terraform (via the pipeline) creates the capacity.
+
+tenant_id                    = "00000000-0000-0000-0000-000000000000" # your Entra tenant id
+workspace_environment_suffix = "UAT"
+create_domains               = true # first environment to deploy; later environments look the domains up
+
+# Capacity (created by Terraform, paused by the pipeline after each apply)
+create_capacity          = true
+capacity_name            = "mycompanyfabricacc" # 3-63 lowercase letters/digits
+capacity_sku             = "F2"
+capacity_resource_group  = "rg-fabricvending-capacity" # created by scripts/bootstrap-identity.ps1
+capacity_location        = "westeurope"
+capacity_admin_email     = "admin@yourtenant.onmicrosoft.com" # a native member; guests (#EXT#) are rejected
+capacity_subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# The pipeline's service principal administers the capacity so it can assign workspaces to it.
+# bootstrap-identity.ps1 prints its object id.
+capacity_extra_admins = ["00000000-0000-0000-0000-000000000000"]
+
+# capacity_keep_running = true # leave the capacity running after applies (events); billed while running
+
+# Added to the Admin group of every workspace in this environment. List every account you use in Fabric
+# (a guest account and a native account are different identities).
+workspace_admin_user_object_ids = [
+  "00000000-0000-0000-0000-000000000000",
+]

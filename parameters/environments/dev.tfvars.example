@@ -1,0 +1,20 @@
+# ── Environment: DEV ──────────────────────────────────────────────────────────
+# Copy to parameters/environments/dev.tfvars and fill in your values.
+
+tenant_id                    = "00000000-0000-0000-0000-000000000000"  # Your Azure AD tenant ID
+workspace_environment_suffix = "DEV"
+fabric_capacity_id           = "00000000-0000-0000-0000-000000000000"  # Existing Fabric capacity GUID (or omit and set create_capacity = true)
+create_domains               = true   # Create domains in DEV; set false in UAT/PROD
+
+# Optional: SPN to grant Admin on all workspaces (e.g. a CI/CD pipeline identity)
+# deployment_spn_object_id = "00000000-0000-0000-0000-000000000000"
+
+# Optional: existing AAD group to nest into each workspace Admin group (DEV/UAT) or Member group (PROD)
+# owner_group_display_name = "Fabric Admins"
+
+# Optional: Fabric configured Git connection ID (required if any workspace has git_integration = true)
+# git_connection_id = "00000000-0000-0000-0000-000000000000"
+
+# Sensitive: pass as TF_VAR_* env vars or via a secrets manager — never commit these
+# fabric_spn_client_id     = "..."
+# fabric_spn_client_secret = "..."

@@ -1,0 +1,94 @@
+# Workspaces, role groups and capacities. A pull request gets a plan per environment; a push to
+# main plans and applies acc, then prod. Prod waits for a reviewer on the `prod` GitHub environment
+# (required reviewers need GitHub Team/Enterprise for a private repository, or a public repository).
+# Values come from repository variables written by scripts/bootstrap-identity.ps1 -Platform github.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["tenant_settings/**", "parameters/tenant-settings/**", "README.md", "assets/**"]
+  pull_request:
+    paths-ignore: ["tenant_settings/**", "parameters/tenant-settings/**", "README.md", "assets/**"]
+
+permissions:
+  id-token: write
+  contents: read
+
+# One workspaces deploy at a time: an older pending run is replaced by the newest, a running one finishes.
+concurrency:
+  group: fabric-vending-deploy
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    strategy:
+      matrix:
+        environment: [acc, prod]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/terraform
+        with:
+          stack: workspaces
+          environment: ${{ matrix.environment }}
+          command: plan
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          fabric-client-id: ${{ vars.FABRIC_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          tfstate-container: ${{ vars.TFSTATE_CONTAINER }}
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: tfplan-${{ matrix.environment }}
+          path: tfplan
+          include-hidden-files: true
+
+  apply-acc:
+    if: github.event_name == 'push'
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: acc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-acc
+      - uses: ./.github/actions/terraform
+        with:
+          stack: workspaces
+          environment: acc
+          command: apply
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          fabric-client-id: ${{ vars.FABRIC_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          tfstate-container: ${{ vars.TFSTATE_CONTAINER }}
+
+  apply-prod:
+    if: github.event_name == 'push'
+    needs: apply-acc
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-prod
+      - uses: ./.github/actions/terraform
+        with:
+          stack: workspaces
+          environment: prod
+          command: apply
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          fabric-client-id: ${{ vars.FABRIC_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          tfstate-container: ${{ vars.TFSTATE_CONTAINER }}

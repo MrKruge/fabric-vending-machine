@@ -1,0 +1,68 @@
+# Install Terraform, write the backend, init, then plan or apply the tenant settings stack.
+# Same two identities as steps/terraform.yml: the managed identity for the state backend, the
+# service principal for the Fabric and Graph APIs. Tenant settings use the global scope's connections (sc-fabricvending-*-global), not acc or prod.
+
+parameters:
+  - name: command
+    type: string
+    values: [plan, apply]
+
+steps:
+  - bash: bash scripts/install-terraform.sh 1.12.0
+    displayName: Install Terraform
+
+  - bash: |
+      cat > tenant_settings/backend.generated.tf <<EOF
+      terraform {
+        backend "azurerm" {
+          resource_group_name  = "$(TFSTATE_RESOURCE_GROUP)"
+          storage_account_name = "$(TFSTATE_STORAGE_ACCOUNT)"
+          container_name       = "$(TFSTATE_CONTAINER)"
+          key                  = "fabric-vending-tenant-settings.tfstate"
+          use_oidc             = true
+          use_azuread_auth     = true
+        }
+      }
+      EOF
+    displayName: Write backend config
+
+  # Azure DevOps only issues an OIDC token for a service connection that a task references explicitly.
+  - task: AzureCLI@2
+    displayName: Authorize Fabric service connection
+    inputs:
+      azureSubscription: sc-fabricvending-fabric-global
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: echo "Fabric service connection authorized for this job."
+      addSpnToEnvironment: false
+
+  - task: AzureCLI@2
+    displayName: Terraform ${{ parameters.command }} (tenant settings)
+    inputs:
+      azureSubscription: sc-fabricvending-azure-global
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: tenant_settings
+      inlineScript: |
+        set -euo pipefail
+        terraform init -input=false
+        if [ "${{ parameters.command }}" = "plan" ]; then
+          terraform plan -input=false -var-file=../parameters/tenant-settings/tenant-settings.tfvars -out=tfplan
+        else
+          terraform apply -input=false tfplan
+        fi
+    env:
+      TF_IN_AUTOMATION: "true"
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+      ARM_TENANT_ID: $(AZURE_TENANT_ID)
+      ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+      ARM_ADO_PIPELINE_SERVICE_CONNECTION_ID: $(AZURE_SERVICE_CONNECTION_ID)
+      ARM_OIDC_AZURE_SERVICE_CONNECTION_ID: $(AZURE_SERVICE_CONNECTION_ID)
+      TF_VAR_tenant_id: $(AZURE_TENANT_ID)
+      TF_VAR_fabric_spn_client_id: $(FABRIC_CLIENT_ID)
+      TF_VAR_fabric_service_connection_id: $(FABRIC_SERVICE_CONNECTION_ID)
+      FABRIC_USE_OIDC: "true"
+      FABRIC_OIDC_REQUEST_TOKEN: $(System.AccessToken)
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      SYSTEM_OIDCREQUESTURI: $(System.OidcRequestUri)

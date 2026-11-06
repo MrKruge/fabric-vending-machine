@@ -1,0 +1,102 @@
+name: Terraform on Fabric Vending
+description: Plan or apply one Terraform stack with OIDC (no secrets). Resumes the environment's capacity first and pauses it after.
+inputs:
+  stack:
+    description: workspaces or tenant-settings
+    required: true
+  environment:
+    description: Environment name (workspaces stack - the parameters/environments/<name>.tfvars file)
+    required: true
+  command:
+    description: plan or apply
+    required: true
+  azure-client-id:
+    description: Client id of the managed identity (Azure and the state backend)
+    required: true
+  fabric-client-id:
+    description: Client id of the service principal (Fabric and Graph APIs)
+    required: true
+  tenant-id:
+    required: true
+  subscription-id:
+    required: true
+  tfstate-resource-group:
+    required: true
+  tfstate-storage-account:
+    required: true
+  tfstate-container:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.12.0"
+        terraform_wrapper: false
+
+    - name: Azure login (managed identity via OIDC)
+      uses: azure/login@v2
+      with:
+        client-id: ${{ inputs.azure-client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}
+
+    - name: Resume capacity
+      if: inputs.stack == 'workspaces'
+      shell: bash
+      run: bash scripts/capacity.sh "${{ inputs.environment }}" resume
+
+    - name: Terraform ${{ inputs.command }}
+      shell: bash
+      env:
+        TF_IN_AUTOMATION: "true"
+        ARM_USE_OIDC: "true"
+        ARM_CLIENT_ID: ${{ inputs.azure-client-id }}
+        ARM_TENANT_ID: ${{ inputs.tenant-id }}
+        ARM_SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        TF_VAR_tenant_id: ${{ inputs.tenant-id }}
+        TF_VAR_azure_client_id: ${{ inputs.azure-client-id }}
+        TF_VAR_fabric_spn_client_id: ${{ inputs.fabric-client-id }}
+        FABRIC_USE_OIDC: "true"
+        FABRIC_TENANT_ID: ${{ inputs.tenant-id }}
+        FABRIC_CLIENT_ID: ${{ inputs.fabric-client-id }}
+        STACK: ${{ inputs.stack }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        COMMAND: ${{ inputs.command }}
+        TFSTATE_RESOURCE_GROUP: ${{ inputs.tfstate-resource-group }}
+        TFSTATE_STORAGE_ACCOUNT: ${{ inputs.tfstate-storage-account }}
+        TFSTATE_CONTAINER: ${{ inputs.tfstate-container }}
+      run: |
+        set -euo pipefail
+        if [ "$STACK" = "workspaces" ]; then
+          dir=.; key="fabric-vending-${ENVIRONMENT}.tfstate"
+          bash scripts/merge-workspaces.sh parameters/workspaces > merged_workspaces.auto.tfvars
+          varfile="parameters/environments/${ENVIRONMENT}.tfvars"
+        else
+          dir=tenant_settings; key="fabric-vending-tenant-settings.tfstate"
+          varfile="../parameters/tenant-settings/tenant-settings.tfvars"
+        fi
+        {
+          echo 'terraform {'
+          echo '  backend "azurerm" {'
+          echo "    resource_group_name  = \"${TFSTATE_RESOURCE_GROUP}\""
+          echo "    storage_account_name = \"${TFSTATE_STORAGE_ACCOUNT}\""
+          echo "    container_name       = \"${TFSTATE_CONTAINER}\""
+          echo "    key                  = \"${key}\""
+          echo '    use_oidc             = true'
+          echo '    use_azuread_auth     = true'
+          echo '  }'
+          echo '}'
+        } > "$dir/backend.generated.tf"
+        cd "$dir"
+        terraform init -input=false
+        if [ "$COMMAND" = "plan" ]; then
+          terraform plan -input=false -var-file="$varfile" -out=tfplan
+        else
+          terraform apply -input=false tfplan
+        fi
+
+    - name: Pause capacity
+      if: always() && inputs.stack == 'workspaces'
+      shell: bash
+      run: bash scripts/capacity.sh "${{ inputs.environment }}" suspend

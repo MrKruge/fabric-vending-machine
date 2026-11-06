@@ -1,0 +1,82 @@
+# Shared steps: install Terraform, write the backend, merge workspace tfvars, init, then plan or apply.
+#
+# Two identities, both via workload identity federation (no secret anywhere):
+#   AZURE_*  : user-assigned managed identity. State backend + azurerm (capacity) + ARM calls.
+#   FABRIC_* : service principal. Fabric and Microsoft Graph APIs, which cannot use a managed identity.
+# Each identity has its own Azure DevOps service connection; the pipeline's OIDC token is exchanged
+# for the identity behind it.
+
+parameters:
+  - name: environment
+    type: string
+  - name: command
+    type: string
+    values: [plan, apply]
+
+steps:
+  - bash: bash scripts/install-terraform.sh 1.12.0
+    displayName: Install Terraform
+
+  - bash: |
+      cat > backend.generated.tf <<EOF
+      terraform {
+        backend "azurerm" {
+          resource_group_name  = "$(TFSTATE_RESOURCE_GROUP)"
+          storage_account_name = "$(TFSTATE_STORAGE_ACCOUNT)"
+          container_name       = "$(TFSTATE_CONTAINER)"
+          key                  = "fabric-vending-${{ parameters.environment }}.tfstate"
+          use_oidc             = true
+          use_azuread_auth     = true
+        }
+      }
+      EOF
+    displayName: Write backend config
+
+  - bash: bash scripts/merge-workspaces.sh parameters/workspaces > merged_workspaces.auto.tfvars
+    displayName: Merge workspace definitions
+
+  # Azure DevOps only issues an OIDC token for a service connection that a task in the job
+  # references explicitly, so both connections are named by a task input.
+  - task: AzureCLI@2
+    displayName: Authorize Fabric service connection
+    inputs:
+      azureSubscription: sc-fabricvending-fabric-${{ parameters.environment }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: echo "Fabric service connection authorized for this job."
+      addSpnToEnvironment: false
+
+  - task: AzureCLI@2
+    displayName: Terraform ${{ parameters.command }}
+    inputs:
+      azureSubscription: sc-fabricvending-azure-${{ parameters.environment }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        terraform init -input=false
+        if [ "${{ parameters.command }}" = "plan" ]; then
+          terraform plan -input=false -var-file="parameters/environments/${{ parameters.environment }}.tfvars" -out=tfplan
+        else
+          terraform apply -input=false tfplan
+        fi
+    env:
+      TF_IN_AUTOMATION: "true"
+      # Backend (state storage) and azurerm authenticate as the managed identity
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: $(AZURE_CLIENT_ID)
+      ARM_TENANT_ID: $(AZURE_TENANT_ID)
+      ARM_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+      ARM_ADO_PIPELINE_SERVICE_CONNECTION_ID: $(AZURE_SERVICE_CONNECTION_ID)
+      ARM_OIDC_AZURE_SERVICE_CONNECTION_ID: $(AZURE_SERVICE_CONNECTION_ID)
+      # Provider identities (see providers.tf)
+      TF_VAR_tenant_id: $(AZURE_TENANT_ID)
+      TF_VAR_azure_client_id: $(AZURE_CLIENT_ID)
+      TF_VAR_azure_service_connection_id: $(AZURE_SERVICE_CONNECTION_ID)
+      TF_VAR_fabric_spn_client_id: $(FABRIC_CLIENT_ID)
+      TF_VAR_fabric_service_connection_id: $(FABRIC_SERVICE_CONNECTION_ID)
+      # azuread and fabric find the agent's OIDC endpoint themselves; they only need the token
+      FABRIC_USE_OIDC: "true"
+      FABRIC_OIDC_REQUEST_TOKEN: $(System.AccessToken)
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      SYSTEM_OIDCREQUESTURI: $(System.OidcRequestUri)

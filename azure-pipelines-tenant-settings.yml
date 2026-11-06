@@ -1,0 +1,51 @@
+# Fabric tenant settings (tenant-wide). Runs on its own, only when the settings or this stack change,
+# so editing them does not plan the workspaces and editing workspaces does not touch the tenant.
+# PRs get a plan (build policy from scripts/bootstrap-identity.ps1); a push to main plans, then
+# waits for approval on the fabricvending-global environment before applying.
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include:
+      - tenant_settings/*
+      - parameters/tenant-settings/*
+      - azure-pipelines-tenant-settings.yml
+      - .azuredevops/steps/tenant-settings.yml
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: fabricvending-global # tenant-wide scope, independent of acc and prod
+
+stages:
+  - stage: Plan
+    jobs:
+      - job: plan
+        steps:
+          - checkout: self
+          - template: .azuredevops/steps/tenant-settings.yml
+            parameters:
+              command: plan
+          - publish: $(Build.SourcesDirectory)/tenant_settings/tfplan
+            artifact: tfplan-tenant-settings
+            displayName: Publish plan
+
+  - stage: Apply
+    dependsOn: Plan
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - deployment: apply
+        environment: fabricvending-global
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - bash: cp "$(Pipeline.Workspace)/tfplan-tenant-settings/tfplan" "$(Build.SourcesDirectory)/tenant_settings/tfplan"
+                  displayName: Stage saved plan
+                - template: .azuredevops/steps/tenant-settings.yml
+                  parameters:
+                    command: apply
