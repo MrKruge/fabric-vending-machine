@@ -145,7 +145,7 @@ Put the printed service principal object id in `capacity_extra_admins` in every 
 - Azure DevOps: a build queued by hand does not satisfy the pull request's build policy. After a fix,
   push a commit or `az repos pr policy queue --id <pr> --evaluation-id <id>` (ids from
   `az repos pr policy list --id <pr>`).
-- Afterwards verify, read-only: both capacities exist and are paused, workspaces are Active with their
+- Afterwards verify, read-only: both capacities exist (running, or paused when `capacity_auto_pause = true`), workspaces are Active with their
   domain, and the user's accounts are in the Admin groups.
 
 ## 7. Tenant settings (optional, later)
@@ -166,7 +166,8 @@ pipeline's service principal depends on cannot be turned off.
   bootstrap-github; they replace it now.
 - Tenant settings that still name a deleted group (earlier onboarding cleaned up) are repaired by
   bootstrap-identity; it prints which group it dropped.
-- A paused capacity breaks `terraform plan`; the pipeline resumes it first and pauses it afterwards.
+- A paused capacity breaks `terraform plan`; the pipeline resumes it first. Pausing afterwards is opt-in
+  (`capacity_auto_pause = true`); ask whether they want it (saves cost, but the capacity is unavailable between runs).
   Capacity transitions can take minutes; do not resume while it is Pausing.
 - The Power BI Service principal can be disabled in a tenant (AADSTS500014): a Global Administrator enables it.
 - GitHub required reviewers need a public repository, or GitHub Team/Enterprise for a private one.

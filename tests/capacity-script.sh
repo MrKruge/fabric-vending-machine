@@ -32,7 +32,8 @@ capacity_name            = "testcapacity"
 capacity_resource_group  = "rg-test"
 capacity_subscription_id = "00000000-0000-0000-0000-000000000000"
 TFVARS
-{ cat "$work/env/testenv.tfvars"; echo 'capacity_keep_running = true # event'; } > "$work/env/keepenv.tfvars"
+{ cat "$work/env/testenv.tfvars"; echo 'capacity_auto_pause = true # opt in'; } > "$work/env/pauseenv.tfvars"
+{ cat "$work/env/testenv.tfvars"; echo 'capacity_auto_pause = false'; } > "$work/env/nopauseenv.tfvars"
 export CAPACITY_ENV_DIR="$work/env"
 
 export PATH="$work/bin:$PATH" CAPACITY_SETTLE_SLEEP=0 CAPACITY_ACTIVE_SLEEP=0
@@ -50,11 +51,12 @@ check() { # name expected-exit expected-final-state initial-state action
 check "resume a paused capacity"                 0 Active  Paused   resume
 check "resume waits for a pause in progress"     0 Active  Pausing  resume
 check "resume leaves an active capacity alone"   0 Active  Active   resume
-check "suspend an active capacity"               0 Pausing Active   suspend
-check "suspend leaves a paused capacity alone"   0 Paused  Paused   suspend
+check "default: suspend leaves it running"       0 Active  Active   suspend
+check "auto_pause=false: suspend is skipped"     0 Active  Active   suspend nopauseenv
+check "auto_pause: suspend an active capacity"   0 Pausing Active   suspend pauseenv
+check "auto_pause: paused capacity left alone"   0 Paused  Paused   suspend pauseenv
+check "auto_pause: resume still works"           0 Active  Paused   resume  pauseenv
 check "missing capacity is skipped"              0 missing missing  resume
-check "keep_running: suspend is skipped"         0 Active  Active   suspend keepenv
-check "keep_running: resume still works"         0 Active  Paused   resume  keepenv
 
 bash "$root/scripts/capacity.sh" testenv explode >/dev/null 2>&1; [ $? = 2 ] && echo "ok   rejects an unknown action" || { echo "FAIL rejects an unknown action"; fail=1; }
 bash "$root/scripts/capacity.sh" nosuchenv resume >/dev/null 2>&1; [ $? = 2 ] && echo "ok   rejects an unknown environment" || { echo "FAIL rejects an unknown environment"; fail=1; }

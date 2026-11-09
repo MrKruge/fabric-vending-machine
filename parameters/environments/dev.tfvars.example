@@ -7,7 +7,7 @@ tenant_id                    = "00000000-0000-0000-0000-000000000000" # your Ent
 workspace_environment_suffix = "DEV"
 create_domains               = false # acc keeps creating the domains (its state owns them); dev looks them up
 
-# Capacity (created by Terraform, paused by the pipeline after each apply)
+# Capacity (created by Terraform; resumed before every run if it is paused)
 create_capacity          = true
 capacity_name            = "mycompanyfabricdev" # 3-63 lowercase letters/digits, unique per region
 capacity_sku             = "F2"
@@ -16,6 +16,7 @@ capacity_location        = "westeurope"
 capacity_admin_email     = "admin@yourtenant.onmicrosoft.com" # UPN of a native member; no guests, no #EXT#
 capacity_subscription_id = "00000000-0000-0000-0000-000000000000"
 capacity_extra_admins    = ["00000000-0000-0000-0000-000000000000"] # pipeline service principal object id
+# capacity_auto_pause    = true # opt-in: pause after every plan/apply
 
 workspace_admin_user_object_ids = [
   "00000000-0000-0000-0000-000000000000",

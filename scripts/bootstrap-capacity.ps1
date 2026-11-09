@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Registers Microsoft.Fabric and creates (or updates) a Fabric capacity via ARM, then optionally pauses it.
+    Registers Microsoft.Fabric and creates (or updates) a Fabric capacity via ARM. Pass -Pause to pause it afterwards.
 
 .DESCRIPTION
     Use this instead of Terraform's create_capacity when you need a SKU the azurerm provider
@@ -23,8 +23,8 @@
 .PARAMETER AdminEmail
     One or more capacity admins (UPN or SPN object ID).
 
-.PARAMETER LeaveRunning
-    Skip the final pause. By default the capacity is paused so it does not bill while idle.
+.PARAMETER Pause
+    Pause the capacity once it is created, so it does not bill while idle. Off by default.
 
 .EXAMPLE
     .\bootstrap-capacity.ps1 -SubscriptionId <sub> -CapacityName fabvendingdemo `
@@ -39,7 +39,7 @@ param(
     [string] $Sku               = "F2",
     [string] $Location          = "westeurope",
     [string] $ResourceGroupName = "rg-fabricvending-capacity",
-    [switch] $LeaveRunning
+    [switch] $Pause
 )
 
 Set-StrictMode -Version Latest
@@ -87,7 +87,7 @@ try {
 }
 finally { Remove-Item $bodyFile -Force -ErrorAction SilentlyContinue }
 
-# 4. Wait for provisioning, then pause
+# 4. Wait for provisioning, then pause if asked
 do {
     Start-Sleep -Seconds 10
     $props = Invoke-Az rest --method get --url $url --query "properties.[provisioningState,state]" -o tsv
@@ -96,7 +96,7 @@ do {
 } while ($prov -notin "Succeeded", "Failed")
 if ($prov -eq "Failed") { throw "Capacity provisioning failed" }
 
-if (-not $LeaveRunning -and $cap -eq "Active") {
+if ($Pause -and $cap -eq "Active") {
     Write-Host "Pausing capacity (billing stops; resume with: az rest --method post --url '$($url -replace '\?', '/resume?')')"
     Invoke-Az rest --method post --url ($url -replace '\?', '/suspend?') --output none | Out-Null
 }
@@ -109,7 +109,7 @@ if ($Sku -eq "F0") {
     Write-Host "  create_capacity         = false   # it exists already; Terraform must not create it"
     Write-Host "  fabric_capacity_name    = `"$CapacityName`""
 }
-Write-Host "  capacity_name           = `"$CapacityName`"   # the pipeline pauses/resumes it by these three"
+Write-Host "  capacity_name           = `"$CapacityName`"   # the pipeline resumes (and with capacity_auto_pause pauses) it by these three"
 Write-Host "  capacity_resource_group = `"$ResourceGroupName`""
 Write-Host "  capacity_subscription_id = `"$SubscriptionId`""
 Write-Host "Terraform does not manage this capacity's admins: include the pipeline service principal's object id in -AdminEmail"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Resume or suspend the Fabric capacity of one environment and wait until it has settled.
 # The Fabric provider refuses to plan or apply workspaces against a paused capacity, so plan and
-# apply both bracket their work with this. Needs a logged-in `az` that can manage the capacity.
+# apply always resume it first. Pausing afterwards is opt-in: `suspend` only acts when the
+# environment's tfvars set capacity_auto_pause = true. Needs a logged-in `az` that can manage it.
 # Name, resource group and subscription come from parameters/environments/<environment>.tfvars;
 # an environment without a capacity_name, or a capacity that does not exist yet, is skipped.
 #
@@ -29,11 +30,11 @@ if [ -z "$name" ]; then
   exit 0
 fi
 
-# capacity_keep_running = true in the environment's tfvars leaves the capacity running after an apply
-# (for example during an event), so a follow-up run does not wait for a pause to finish. Bool, not quoted.
-keep_running="$(grep -E '^[[:space:]]*capacity_keep_running[[:space:]]*=' "$tfvars" | head -1 | sed -E 's/#.*//; s/.*=[[:space:]]*//; s/[[:space:]"]//g' || true)"
-if [ "$action" = "suspend" ] && [ "$keep_running" = "true" ]; then
-  echo "capacity_keep_running is true in $env_name; leaving the capacity running."
+# Pausing after a run is opt-in: capacity_auto_pause = true in the environment's tfvars (a bool, not
+# quoted). Without it the capacity keeps running, and billing, as it would without this pipeline.
+auto_pause="$(grep -E '^[[:space:]]*capacity_auto_pause[[:space:]]*=' "$tfvars" | head -1 | sed -E 's/#.*//; s/.*=[[:space:]]*//; s/[[:space:]"]//g' || true)"
+if [ "$action" = "suspend" ] && [ "$auto_pause" != "true" ]; then
+  echo "capacity_auto_pause is not true in $env_name; leaving the capacity running."
   exit 0
 fi
 

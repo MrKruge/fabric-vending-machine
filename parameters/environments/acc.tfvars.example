@@ -6,7 +6,7 @@ tenant_id                    = "00000000-0000-0000-0000-000000000000" # your Ent
 workspace_environment_suffix = "UAT"
 create_domains               = true # first environment the pipeline deploys: creates every workspace data_domain
 
-# Capacity (created by Terraform, paused by the pipeline after each apply)
+# Capacity (created by Terraform; resumed before every run if it is paused)
 create_capacity          = true
 capacity_name            = "mycompanyfabricacc" # 3-63 lowercase letters/digits, unique per region
 capacity_sku             = "F2"
@@ -19,7 +19,7 @@ capacity_subscription_id = "00000000-0000-0000-0000-000000000000"
 # bootstrap-identity.ps1 prints its object id at the end.
 capacity_extra_admins = ["00000000-0000-0000-0000-000000000000"]
 
-# capacity_keep_running = true # leave the capacity running after applies (events); billed while running
+# capacity_auto_pause = true # opt-in: pause after every plan/apply, so it only bills while Terraform runs
 
 # Added to the Admin group of every workspace in this environment. List every account you use in Fabric:
 # a guest account, a personal (#EXT#) account and a native account are different identities.

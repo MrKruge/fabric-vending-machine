@@ -63,10 +63,10 @@ variable "capacity_extra_admins" {
   description = "Additional capacity administrators (UPN of a native member, or service principal object ID). Add the pipeline service principal here so it can assign workspaces to the capacity. Guest (#EXT#) UPNs are rejected by Fabric."
 }
 
-variable "capacity_keep_running" {
+variable "capacity_auto_pause" {
   type        = bool
   default     = false
-  description = "Read by scripts/capacity.sh, not by Terraform. When true the pipeline leaves the capacity running after an apply instead of pausing it (for example during an event). A running capacity is billed; switch it back to false afterwards."
+  description = "Read by scripts/capacity.sh, not by Terraform. Opt-in: when true the pipeline pauses the capacity after every plan and apply, so it only bills while Terraform works (and is paused for everyone else in between). Default false: the capacity keeps running. A paused capacity is always resumed before a run."
 }
 
 variable "capacity_subscription_id" {

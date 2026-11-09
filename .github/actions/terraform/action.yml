@@ -97,7 +97,7 @@ runs:
           terraform apply -input=false tfplan
         fi
 
-    - name: Pause capacity
+    - name: Pause capacity (only with capacity_auto_pause = true)
       if: always() && inputs.stack == 'workspaces'
       shell: bash
       run: bash scripts/capacity.sh "${{ inputs.environment }}" suspend
