@@ -24,7 +24,8 @@ stages:
     ${{ if eq(parameters.planAfter, '') }}:
       dependsOn: []
     ${{ else }}:
-      dependsOn: [${{ parameters.planAfter }}]
+      dependsOn:
+        - ${{ parameters.planAfter }}
       condition: and(not(canceled()), or(ne(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.${{ parameters.planAfter }}.result, 'Succeeded')))
     variables:
       - group: fabricvending-${{ parameters.environment }}
