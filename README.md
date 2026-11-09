@@ -28,7 +28,7 @@ Terraform never runs from a laptop. A few one-time bootstrap scripts prepare sta
 | `deploy` | Workspaces, role groups, capacities. A pull request gets a plan per environment. A push to `main` plans and applies `acc`, then plans and applies `prod` (planned after acc, so it sees what acc created). | Pull requests and pushes to `main`. |
 | `tenant-settings` | Tenant-wide Fabric settings in their own stack and state, behind their own approval. | Only when the settings or that stack change. |
 
-Authentication is workload identity federation, so no secret exists anywhere: a user-assigned managed identity for Azure and a service principal for the Fabric and Microsoft Graph APIs. Capacities are resumed before a plan or apply and paused afterwards, so they only bill while Terraform works.
+Authentication is workload identity federation, so no secret exists anywhere: a user-assigned managed identity for Azure and a service principal for the Fabric and Microsoft Graph APIs. A paused capacity is resumed before a plan or apply. Pausing it again afterwards is opt-in (`capacity_auto_pause = true`), so by default capacities keep running like any other.
 
 **Status:** onboarded end to end from a fresh clone on both Azure DevOps and GitHub Actions, in two different tenants, in November 2026. Everything that went wrong on the way is fixed in the scripts and covered below.
 
@@ -195,7 +195,7 @@ Creates `rg-fabricvending-tfstate`, the storage account (Entra ID access only, n
 1. Put the service principal object id that `bootstrap-identity.ps1` printed into `capacity_extra_admins` in both environment files, so the pipeline can assign workspaces to the capacities.
 2. Commit the tfvars and workspace files on a branch and open a pull request. `validate` and a plan per environment run on it. Read the plans.
 3. Merge. `deploy` plans and applies `acc`, then plans `prod` and applies it (after approval, where a reviewer is set).
-4. Check the result: both capacities exist and are paused, the workspaces are active with their domain, and your accounts are in the Admin groups.
+4. Check the result: both capacities exist (running, or paused with `capacity_auto_pause`), the workspaces are active with their domain, and your accounts are in the Admin groups.
 
 On Azure DevOps a build you queue by hand does not satisfy a pull request's build policy. After fixing a failed plan, push a commit, or re-queue the policy itself: `az repos pr policy list --id <pr>` to find the evaluation id, then `az repos pr policy queue --id <pr> --evaluation-id <id>`.
 
@@ -233,8 +233,8 @@ The tenant settings the service principal needs: `AllowServicePrincipalsUseReadA
 **In the pipeline**
 
 - **Terraform 1.12 or newer.** The azurerm backend supports Azure DevOps OIDC from 1.12.0.
-- **A paused capacity breaks the plan.** The pipeline resumes it first and pauses it afterwards. Capacity transitions can take minutes; don't resume while it is pausing.
-- **Keeping a capacity running** for a demo: set `capacity_keep_running = true` in that environment's tfvars through a pull request, and back to `false` afterwards (a running capacity is billed). `scripts/capacity.sh` reads it.
+- **A paused capacity breaks the plan.** The pipeline resumes it first. Capacity transitions can take minutes; don't resume while it is pausing.
+- **Pausing capacities to save cost** is opt-in: set `capacity_auto_pause = true` in an environment's tfvars and the pipeline pauses that capacity after every plan and apply, so it only bills while Terraform works. Workspaces on it are unavailable while it is paused. `scripts/capacity.sh` reads it.
 - **"Instance cannot be destroyed" for `fabric_domain.this[...]`.** Domains are protected from deletion. When no workspace uses a domain any more (removed, or `data_domain` renamed), keep its name in `domains` in `acc.tfvars` and the domain stays. To really delete one, do it in a pull request that drops the name and also takes `prevent_destroy` out of `workspace_vending/domains.tf` for that one change; put it back afterwards.
 - **Domain not assigned in a pull request plan for prod.** On a pull request both environments are planned side by side, so prod cannot find a domain that acc has not created yet and leaves the assignment out of that plan. After merging, prod is planned after acc applied and gets it.
 - **Fabric API calls from the CLI need MFA.** For ad hoc reads: `az login --tenant <tenant> --scope https://api.fabric.microsoft.com/.default`.
@@ -360,7 +360,7 @@ pwsh scripts/check-alignment.ps1 -GroupPrefix "FABRIC_WORKSPACE" -WorkspaceNames
 | `capacity_admin_email` | `null` | UPN of a native member who administers the capacity |
 | `capacity_extra_admins` | `[]` | More capacity admins: the pipeline service principal's object id goes here |
 | `capacity_subscription_id` | `null` | Subscription of the capacity resource group |
-| `capacity_keep_running` | `false` | Read by `capacity.sh`: leave the capacity running after an apply |
+| `capacity_auto_pause` | `false` | Opt-in, read by `capacity.sh`: pause the capacity after every plan and apply |
 | `fabric_capacity_id` / `fabric_capacity_name` | `null` | Use an existing capacity instead of creating one |
 | `create_domains` | `false` | `true` in the first environment the pipeline deploys (acc), `false` in the others |
 | `domains` | `[]` | Extra domains no workspace uses yet; every workspace `data_domain` is included automatically |

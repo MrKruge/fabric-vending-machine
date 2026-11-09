@@ -1,6 +1,7 @@
 # One environment = a plan stage and an apply stage. Capacity name/resource group come from the
 # environment's tfvars (Terraform creates the capacity). The pipeline resumes it before the plan
-# and the apply (the Fabric provider refuses a paused capacity) and pauses it again afterwards.
+# and the apply (the Fabric provider refuses a paused capacity), and pauses it again afterwards only
+# when the tfvars opt in with capacity_auto_pause = true.
 #
 # planAfter: the apply stage this environment's plan waits for (prod passes Apply_acc), so it is
 # planned only after acc applied and sees what acc created (for example a new Fabric domain). On

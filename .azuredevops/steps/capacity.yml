@@ -1,5 +1,6 @@
 # Resume or suspend the environment's Fabric capacity. The Fabric provider refuses to plan or apply
-# workspaces against a paused capacity, so plan and apply both bracket their work with this.
+# workspaces against a paused capacity, so plan and apply resume it first. Suspend only acts when
+# the environment's tfvars opt in with capacity_auto_pause = true.
 # The logic lives in scripts/capacity.sh (shared with other CI systems and tested offline).
 
 parameters:
