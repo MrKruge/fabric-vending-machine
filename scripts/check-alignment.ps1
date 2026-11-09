@@ -26,7 +26,7 @@ param(
 $roles = @("Admin", "Contributor", "Viewer", "Member")
 
 # ── Helper: derive expected AAD group name ────────────────────────────────────
-# Mirrors workspace.tf group naming logic.
+# Mirrors workspace_vending/workspace.tf group naming logic.
 
 function Get-GroupName {
     param([string]$DisplayName, [string]$Env, [string]$Role, [string]$Prefix)

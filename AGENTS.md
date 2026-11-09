@@ -13,8 +13,8 @@ change one, change the other.
 ## Rules that apply to every change
 
 - **Terraform plan, apply and destroy run only in the pipeline** (Azure DevOps or GitHub Actions).
-  Locally you may run `terraform fmt`, `terraform init -backend=false`, `terraform validate` and
-  `terraform test`. Nothing else.
+  Locally you may run `terraform fmt`, and in `workspace_vending/` or `tenant_settings/`
+  `terraform init -backend=false`, `terraform validate` and `terraform test`. Nothing else.
 - **No click-ops.** Anything missing is fixed in a script, in Terraform or in a pipeline, then re-run.
   The only manual step is a privileged human activating their admin role (PIM) before a bootstrap.
 - **No secrets anywhere.** Authentication is workload identity federation. Parameter files hold ids, never secrets.
@@ -29,7 +29,7 @@ change one, change the other.
 
 | Path | What it is |
 |---|---|
-| `*.tf` (root) | Workspaces, role groups, capacities (one state per environment) |
+| `workspace_vending/` | Terraform stack: workspaces, role groups, capacities, domains (one state per environment), with its `tests/` |
 | `tenant_settings/` | Fabric tenant settings, a separate stack and state |
 | `parameters/environments/` | Per-environment values (ids only) |
 | `parameters/workspaces/` | One file per logical workspace |
@@ -37,12 +37,12 @@ change one, change the other.
 | `scripts/` | Bootstrap and operational scripts; `capacity.sh` is shared by both CI systems |
 | `azure-pipelines*.yml`, `.azuredevops/` | Azure DevOps pipelines |
 | `.github/` | GitHub Actions workflows and the shared Terraform action |
-| `tests/` | Offline tests (mocked providers, fake `az`) |
+| `tests/` | Script tests (fake `az`) |
 
 ## Checks to run before opening a pull request
 
 ```bash
-terraform fmt -recursive && terraform init -backend=false && terraform validate && terraform test
+terraform fmt -recursive && (cd workspace_vending && terraform init -backend=false && terraform validate && terraform test)
 (cd tenant_settings && terraform init -backend=false && terraform validate && terraform test)
 for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done && bash tests/capacity-script.sh && bash tests/merge-workspaces.sh
 ```

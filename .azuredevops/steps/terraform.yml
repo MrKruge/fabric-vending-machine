@@ -18,7 +18,7 @@ steps:
     displayName: Install Terraform
 
   - bash: |
-      cat > backend.generated.tf <<EOF
+      cat > workspace_vending/backend.generated.tf <<EOF
       terraform {
         backend "azurerm" {
           resource_group_name  = "$(TFSTATE_RESOURCE_GROUP)"
@@ -32,7 +32,8 @@ steps:
       EOF
     displayName: Write backend config
 
-  - bash: bash scripts/merge-workspaces.sh parameters/workspaces > merged_workspaces.auto.tfvars
+  # *.auto.tfvars is only read from the working directory, so it goes next to the stack.
+  - bash: bash scripts/merge-workspaces.sh parameters/workspaces > workspace_vending/merged_workspaces.auto.tfvars
     displayName: Merge workspace definitions
 
   # Azure DevOps only issues an OIDC token for a service connection that a task in the job
@@ -52,11 +53,12 @@ steps:
       azureSubscription: sc-fabricvending-azure-${{ parameters.environment }}
       scriptType: bash
       scriptLocation: inlineScript
+      workingDirectory: workspace_vending
       inlineScript: |
         set -euo pipefail
         terraform init -input=false
         if [ "${{ parameters.command }}" = "plan" ]; then
-          terraform plan -input=false -var-file="parameters/environments/${{ parameters.environment }}.tfvars" -out=tfplan
+          terraform plan -input=false -var-file="../parameters/environments/${{ parameters.environment }}.tfvars" -out=tfplan
         else
           terraform apply -input=false tfplan
         fi

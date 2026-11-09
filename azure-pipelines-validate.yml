@@ -18,12 +18,15 @@ steps:
     displayName: Format check
 
   - bash: terraform init -backend=false
+    workingDirectory: workspace_vending
     displayName: Init (no backend)
 
   - bash: terraform validate
+    workingDirectory: workspace_vending
     displayName: Validate
 
   - bash: terraform test
+    workingDirectory: workspace_vending
     displayName: Test (mocked providers, offline)
 
   - bash: |
@@ -38,8 +41,8 @@ steps:
   - bash: for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done
     displayName: Shell syntax check
 
-  - bash: bash tests/capacity-script.sh
-    displayName: Capacity script test (fake az, offline)
+  - bash: bash tests/capacity-script.sh && bash tests/merge-workspaces.sh
+    displayName: Script tests (fake az, offline)
 
   - pwsh: |
       $failed = $false

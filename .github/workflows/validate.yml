@@ -22,6 +22,7 @@ jobs:
       - name: Workspaces stack
         run: |
           terraform fmt -check -recursive
+          cd workspace_vending
           terraform init -backend=false
           terraform validate
           terraform test
@@ -34,10 +35,11 @@ jobs:
           terraform validate
           terraform test
 
-      - name: Shell syntax and capacity script test
+      - name: Shell syntax and script tests
         run: |
           for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done
           bash tests/capacity-script.sh
+          bash tests/merge-workspaces.sh
 
       - name: PowerShell syntax
         shell: pwsh
