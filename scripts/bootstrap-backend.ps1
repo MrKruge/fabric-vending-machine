@@ -1,146 +1,126 @@
 <#
 .SYNOPSIS
-    Provisions the Azure Storage Account used for Terraform remote state.
+    Creates the Azure Storage Account that holds the Terraform state. Run once, before bootstrap-identity.ps1.
 
 .DESCRIPTION
-    Run this once before your first `terraform init`. It creates:
-      - A resource group
-      - A storage account (LRS, TLS-only, no public blob access)
-      - A blob container named "tfstate"
-      - Assigns the current user (or a specified SPN) Storage Blob Data Contributor
+    Creates, in the given subscription:
+      - a resource group
+      - a storage account: LRS, TLS 1.2, HTTPS only, no public blob access, no shared key access
+        (Entra ID only: the pipelines use use_azuread_auth), blob versioning on
+      - a blob container (default "tfstate")
+      - Storage Blob Data Contributor for the signed-in user (or -AssignRoleTo), so a person can read
+        the state when something needs investigating
 
-    After it completes, copy the printed backend block into backend.tf and run
-    `terraform init`.
+    Terraform itself never runs from your machine: the pipelines write their own backend configuration
+    from the variables bootstrap-identity.ps1 / bootstrap-github.ps1 set. There is nothing to init here.
+
+    Idempotent. Your default `az` subscription is switched to -SubscriptionId for the run (Entra calls
+    follow it) and restored at the end.
 
 .PARAMETER SubscriptionId
-    Azure subscription ID where state storage will live.
+    Subscription that will hold the state (usually the same one as the capacities).
 
 .PARAMETER Location
-    Azure region (e.g. "westeurope"). Defaults to "westeurope".
+    Azure region, for example "swedencentral". Use the same region as the capacities.
 
 .PARAMETER ResourceGroupName
-    Name of the resource group to create. Defaults to "rg-fabricvending-tfstate".
+    Resource group to create. Default "rg-fabricvending-tfstate".
 
 .PARAMETER StorageAccountName
-    Storage account name (3–24 lowercase alphanumeric). Must be globally unique.
+    Storage account name: 3-24 lowercase letters and digits, globally unique.
 
 .PARAMETER ContainerName
-    Blob container name. Defaults to "tfstate".
+    Blob container name. Default "tfstate".
 
 .PARAMETER AssignRoleTo
-    Object ID of a user or SPN to grant Storage Blob Data Contributor.
-    Defaults to the currently signed-in user.
+    Object id of a user or service principal to grant Storage Blob Data Contributor.
+    Default: the signed-in user.
 
 .EXAMPLE
-    .\bootstrap-backend.ps1 `
-        -SubscriptionId "00000000-0000-0000-0000-000000000000" `
-        -StorageAccountName "stfabricvendingtf001"
-
-.EXAMPLE
-    # Assign role to a CI/CD SPN instead of yourself
-    .\bootstrap-backend.ps1 `
-        -SubscriptionId "00000000-0000-0000-0000-000000000000" `
-        -StorageAccountName "stfabricvendingtf001" `
-        -AssignRoleTo "00000000-0000-0000-0000-000000000000"
+    pwsh scripts/bootstrap-backend.ps1 -SubscriptionId <subscription-id> -Location swedencentral `
+        -StorageAccountName <globally-unique-name>
 #>
 
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory)] [string] $SubscriptionId,
+    [Parameter(Mandatory)] [string] $Location,
+    [string] $ResourceGroupName = "rg-fabricvending-tfstate",
     [Parameter(Mandatory)]
-    [string] $SubscriptionId,
-
-    [string] $Location            = "westeurope",
-    [string] $ResourceGroupName   = "rg-fabricvending-tfstate",
-
-    [Parameter(Mandatory)]
+    [ValidatePattern('^[a-z0-9]{3,24}$')]
     [string] $StorageAccountName,
-
-    [string] $ContainerName       = "tfstate",
-    [string] $AssignRoleTo        = ""
+    [string] $ContainerName = "tfstate",
+    [string] $AssignRoleTo  = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ── 1. Check prerequisites ────────────────────────────────────────────────────
-foreach ($cmd in "az") {
-    if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
-        Write-Error "Required tool not found: $cmd. Install the Azure CLI first."
-    }
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+    throw "Azure CLI (az) not found. Install it first: https://learn.microsoft.com/cli/azure/install-azure-cli"
 }
 
-# ── 2. Set subscription ───────────────────────────────────────────────────────
-Write-Host "Setting subscription: $SubscriptionId"
-az account set --subscription $SubscriptionId
+function Invoke-Az {
+    $out = & az @args
+    if ($LASTEXITCODE -ne 0) { throw "az $($args -join ' ') failed" }
+    return $out
+}
 
-# ── 3. Create resource group ──────────────────────────────────────────────────
-Write-Host "Creating resource group: $ResourceGroupName"
-az group create `
-    --name     $ResourceGroupName `
+# az ad / Graph calls follow the DEFAULT subscription's tenant, whatever --subscription says. Switch the
+# default to -SubscriptionId for the run and put the user's own default back however it ends.
+$originalSubscription = & az account show --query id -o tsv 2>$null
+function Restore-Subscription {
+    if ($originalSubscription) { & az account set --subscription $originalSubscription 2>$null | Out-Null }
+}
+trap { Restore-Subscription; break }
+& az account set --subscription $SubscriptionId 2>$null | Out-Null
+$sub = @("--subscription", $SubscriptionId)
+$account = Invoke-Az account show @sub --query "{name:name, tenant:tenantId, user:user.name}" -o json | ConvertFrom-Json
+Write-Host "Subscription: $($account.name) ($SubscriptionId), tenant $($account.tenant), signed in as $($account.user)"
+
+Write-Host "Resource group: $ResourceGroupName ($Location)"
+Invoke-Az group create @sub --name $ResourceGroupName --location $Location --output none | Out-Null
+
+Write-Host "Storage account: $StorageAccountName"
+Invoke-Az storage account create @sub `
+    --name $StorageAccountName `
+    --resource-group $ResourceGroupName `
     --location $Location `
-    --output   none
-
-# ── 4. Create storage account ─────────────────────────────────────────────────
-Write-Host "Creating storage account: $StorageAccountName"
-az storage account create `
-    --name                   $StorageAccountName `
-    --resource-group         $ResourceGroupName `
-    --location               $Location `
-    --sku                    Standard_LRS `
-    --kind                   StorageV2 `
-    --min-tls-version        TLS1_2 `
+    --sku Standard_LRS `
+    --kind StorageV2 `
+    --min-tls-version TLS1_2 `
     --allow-blob-public-access false `
-    --https-only             true `
-    --output                 none
+    --allow-shared-key-access false `
+    --https-only true `
+    --output none | Out-Null
 
-# Enable versioning so accidental state overwrites are recoverable
-az storage account blob-service-properties update `
-    --account-name  $StorageAccountName `
+# Versioning makes an accidental state overwrite recoverable.
+Invoke-Az storage account blob-service-properties update @sub `
+    --account-name $StorageAccountName `
     --resource-group $ResourceGroupName `
     --enable-versioning true `
-    --output none
+    --output none | Out-Null
 
-# ── 5. Create blob container ──────────────────────────────────────────────────
-Write-Host "Creating blob container: $ContainerName"
-az storage container create `
-    --name          $ContainerName `
-    --account-name  $StorageAccountName `
-    --auth-mode     login `
-    --output        none
-
-# ── 6. Assign Storage Blob Data Contributor ───────────────────────────────────
-$storageId = az storage account show `
-    --name           $StorageAccountName `
+# Created through Azure Resource Manager, so it needs neither a key nor a data-plane role.
+Write-Host "Blob container: $ContainerName"
+Invoke-Az storage container-rm create @sub `
+    --storage-account $StorageAccountName `
     --resource-group $ResourceGroupName `
-    --query          id `
-    --output         tsv
+    --name $ContainerName `
+    --output none | Out-Null
 
+$storageId = Invoke-Az storage account show @sub --name $StorageAccountName --resource-group $ResourceGroupName --query id -o tsv
 if ([string]::IsNullOrEmpty($AssignRoleTo)) {
-    $AssignRoleTo = az ad signed-in-user show --query id --output tsv
-    Write-Host "No -AssignRoleTo provided; using signed-in user: $AssignRoleTo"
+    $AssignRoleTo = Invoke-Az ad signed-in-user show --query id -o tsv
 }
+Write-Host "Storage Blob Data Contributor: $AssignRoleTo"
+Invoke-Az role assignment create @sub `
+    --assignee $AssignRoleTo `
+    --role "Storage Blob Data Contributor" `
+    --scope $storageId `
+    --output none | Out-Null
 
-Write-Host "Assigning Storage Blob Data Contributor to: $AssignRoleTo"
-az role assignment create `
-    --assignee   $AssignRoleTo `
-    --role       "Storage Blob Data Contributor" `
-    --scope      $storageId `
-    --output     none
-
-# ── 7. Print backend block to copy into backend.tf ───────────────────────────
-$backendFile = Join-Path (Split-Path $PSScriptRoot -Parent) "backend.generated.tf"
-@"
-terraform {
-  backend "azurerm" {
-    resource_group_name  = "$ResourceGroupName"
-    storage_account_name = "$StorageAccountName"
-    container_name       = "$ContainerName"
-    key                  = "fabric-vending.tfstate"
-    use_azuread_auth     = true
-  }
-}
-"@ | Set-Content -Path $backendFile -Encoding utf8
-
+Restore-Subscription
 Write-Host ""
-Write-Host "Bootstrap complete. Wrote $backendFile (gitignored)."
-Write-Host "Next:  terraform init -reconfigure"
+Write-Host "Done. State storage: $ResourceGroupName / $StorageAccountName / $ContainerName"
+Write-Host "Next: scripts/bootstrap-identity.ps1 with -StateResourceGroup $ResourceGroupName -StorageAccountName $StorageAccountName -Location $Location"

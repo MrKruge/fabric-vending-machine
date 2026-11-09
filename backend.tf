@@ -1,17 +1,9 @@
-# Configure your Terraform state backend here.
-# The azurerm backend with OIDC is recommended for CI/CD pipelines.
+# No backend is configured here on purpose. Terraform only runs in the pipelines, and they write
+# backend.generated.tf (gitignored) at run time from the state storage that
+# scripts/bootstrap-backend.ps1 created:
 #
-# Example — Azure Blob Storage with OIDC:
+#   Azure DevOps:   .azuredevops/steps/terraform.yml   (variable group fabricvending-<env>)
+#   GitHub Actions: .github/actions/terraform/action.yml (repository variables TFSTATE_*)
 #
-# terraform {
-#   backend "azurerm" {
-#     resource_group_name  = "rg-terraform-state"
-#     storage_account_name = "yourstorageaccount"
-#     container_name       = "tfstate"
-#     key                  = "fabric-vending.tfstate"
-#     use_oidc             = true
-#     use_azuread_auth     = true
-#   }
-# }
-#
-# For local development, use the default local backend (no configuration needed).
+# One state file per environment: fabric-vending-<env>.tfstate, authenticated with Entra ID (OIDC).
+# Locally only `terraform init -backend=false`, `validate` and `test` are used.

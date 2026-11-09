@@ -45,6 +45,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $apiVersion = "2023-11-01"
+# `pwsh -File` passes "a,b" as one string; accept both forms.
+$AdminEmail = @($AdminEmail | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 function Invoke-Az {
     $out = & az @args
@@ -52,19 +54,20 @@ function Invoke-Az {
     return $out
 }
 
-Invoke-Az account set --subscription $SubscriptionId | Out-Null
+# Every command names the subscription, so the user's default az subscription is left alone.
+$sub = @("--subscription", $SubscriptionId)
 
 # 1. Resource provider
-$state = Invoke-Az provider show -n Microsoft.Fabric --query registrationState -o tsv
+$state = Invoke-Az provider show @sub -n Microsoft.Fabric --query registrationState -o tsv
 if ($state -ne "Registered") {
     Write-Host "Registering Microsoft.Fabric (was: $state)"
-    Invoke-Az provider register -n Microsoft.Fabric --wait | Out-Null
+    Invoke-Az provider register @sub -n Microsoft.Fabric --wait | Out-Null
 }
 
 # 2. Resource group (an existing group is reused whatever its region; the capacity may live elsewhere)
-if ((Invoke-Az group exists --name $ResourceGroupName) -ne "true") {
+if ((Invoke-Az group exists @sub --name $ResourceGroupName) -ne "true") {
     Write-Host "Creating resource group: $ResourceGroupName ($Location)"
-    Invoke-Az group create --name $ResourceGroupName --location $Location --output none | Out-Null
+    Invoke-Az group create @sub --name $ResourceGroupName --location $Location --output none | Out-Null
 }
 else { Write-Host "Using existing resource group: $ResourceGroupName" }
 
@@ -98,4 +101,16 @@ if (-not $LeaveRunning -and $cap -eq "Active") {
     Invoke-Az rest --method post --url ($url -replace '\?', '/suspend?') --output none | Out-Null
 }
 
-Write-Host "Done. Use in Terraform:  fabric_capacity_name = `"$CapacityName`""
+Write-Host "Done. In parameters/environments/<env>.tfvars set:"
+if ($Sku -eq "F0") {
+    Write-Host "  create_capacity         = true"
+    Write-Host "  capacity_sku            = `"F0`"    # Terraform looks the F0 capacity up instead of creating it"
+} else {
+    Write-Host "  create_capacity         = false   # it exists already; Terraform must not create it"
+    Write-Host "  fabric_capacity_name    = `"$CapacityName`""
+}
+Write-Host "  capacity_name           = `"$CapacityName`"   # the pipeline pauses/resumes it by these three"
+Write-Host "  capacity_resource_group = `"$ResourceGroupName`""
+Write-Host "  capacity_subscription_id = `"$SubscriptionId`""
+Write-Host "Terraform does not manage this capacity's admins: include the pipeline service principal's object id in -AdminEmail"
+Write-Host "(re-run this script with it after bootstrap-identity.ps1), or the pipeline cannot assign workspaces to it."

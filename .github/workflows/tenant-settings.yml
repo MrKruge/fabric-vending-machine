@@ -1,6 +1,8 @@
 # Fabric tenant settings (tenant-wide), in their own stack and state. Runs only when the settings or
 # the stack change. A pull request gets a plan; a push to main plans, then waits for a reviewer on the
-# `global` GitHub environment before applying.
+# `global` GitHub environment before applying (when reviewers are configured on it).
+# Nothing runs until parameters/tenant-settings/tenant-settings.tfvars exists, so pushing the
+# repository as cloned is safe.
 name: tenant-settings
 
 on:
@@ -15,11 +17,29 @@ permissions:
   contents: read
 
 concurrency:
-  group: fabric-vending-tenant-settings
+  group: fabric-vending-tenant-settings-${{ github.event_name == 'push' && 'main' || github.ref }}
   cancel-in-progress: false
 
 jobs:
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        shell: bash
+        run: |
+          if [ -f parameters/tenant-settings/tenant-settings.tfvars ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=No tenant settings governed yet::parameters/tenant-settings/tenant-settings.tfvars does not exist (see README, Tenant settings)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
   plan:
+    if: needs.config.outputs.ready == 'true'
+    needs: config
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

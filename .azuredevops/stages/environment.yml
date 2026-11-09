@@ -1,6 +1,11 @@
 # One environment = a plan stage and an apply stage. Capacity name/resource group come from the
 # environment's tfvars (Terraform creates the capacity). The pipeline resumes it before the plan
 # and the apply (the Fabric provider refuses a paused capacity) and pauses it again afterwards.
+#
+# planAfter: the apply stage this environment's plan waits for (prod passes Apply_acc), so it is
+# planned only after acc applied and sees what acc created (for example a new Fabric domain). On
+# main it runs only when that apply succeeded; on a pull request or another branch the apply is
+# skipped and the plan runs anyway.
 
 parameters:
   - name: environment
@@ -8,11 +13,18 @@ parameters:
   - name: applyDependsOn
     type: object
     default: []
+  - name: planAfter
+    type: string
+    default: ""
 
 stages:
   - stage: Plan_${{ parameters.environment }}
     displayName: Plan ${{ parameters.environment }}
-    dependsOn: []
+    ${{ if eq(parameters.planAfter, '') }}:
+      dependsOn: []
+    ${{ else }}:
+      dependsOn: [${{ parameters.planAfter }}]
+      condition: and(not(canceled()), or(ne(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.Reason'], 'PullRequest'), eq(dependencies.${{ parameters.planAfter }}.result, 'Succeeded')))
     variables:
       - group: fabricvending-${{ parameters.environment }}
     jobs:

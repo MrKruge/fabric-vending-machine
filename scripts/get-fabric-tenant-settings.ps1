@@ -197,7 +197,10 @@ foreach ($s in $Settings) {
     }
 
     # Empty values are left out: the API rejects an empty Integer and the provider cannot round-trip an empty string.
-    $props = @($s.PSObject.Properties['properties']?.Value | Where-Object { [string]$_.value -ne '' })
+    # Most settings have no 'properties' key at all. Piping $null into Where-Object still runs the
+    # predicate once with $_ = $null, which throws under StrictMode, so skip the absent case first.
+    $rawProps = $s.PSObject.Properties['properties']?.Value
+    $props = @(if ($null -ne $rawProps) { $rawProps | Where-Object { $null -ne $_ -and [string]$_.value -ne '' } })
     if ($props -and $props.Count -gt 0) {
         $Lines.Add("    properties = [")
         foreach ($p in $props) {

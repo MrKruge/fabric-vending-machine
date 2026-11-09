@@ -10,9 +10,16 @@
     their permissions, and the empty resource group the capacities will live in.
 
 .DESCRIPTION
-    Run once, after bootstrap-backend.ps1 (and bootstrap-capacity.ps1 if you use F0), and after the
-    code has been pushed to the Azure DevOps repo (pipelines need azure-pipelines.yml to exist).
-    Idempotent: safe to re-run. No secret is ever created: both identities use federated credentials.
+    Run once, after bootstrap-backend.ps1 (and bootstrap-capacity.ps1 if you use F0). For Azure DevOps
+    the project and its Git repository must exist and the code must be pushed first (the pipelines
+    point at azure-pipelines.yml); pushing is safe, nothing runs until this script creates the pipelines.
+    Idempotent: safe to re-run, also after an earlier onboarding in the same tenant (stale federated
+    credentials and deleted groups in tenant settings are repaired). No secret is ever created: both
+    identities use federated credentials. Your default `az` subscription is restored at the end.
+
+    Run it elevated: Global Administrator or Privileged Role Administrator (activate the role in PIM
+    first) for the Graph permissions and the Fabric Administrator role, and Fabric administrator for the
+    tenant settings. Whatever it could not do is listed at the end; re-run it once elevated.
 
     Identities:
       managed identity  (-IdentityName)  Azure side: state storage, capacity create/pause/resume.
@@ -23,20 +30,26 @@
     policies); run scripts/bootstrap-github.ps1 afterwards. The default, azuredevops, is unchanged.
 
     Azure DevOps is driven through its REST API with a token from `az`. If the Azure subscription lives
-    in a different tenant than the Azure DevOps organisation, pass -AzdoAuthSubscriptionId: a subscription
-    your signed-in account can see in the organisation's tenant (only used to obtain the DevOps token).
+    in a different tenant than the Azure DevOps organisation, pass -AzdoAuthSubscriptionId: any
+    subscription your signed-in account can see in the ORGANISATION's tenant. It is only used to get a
+    DevOps token; nothing is created in it. The organisation's tenant is shown in Azure DevOps under
+    Organization settings > Microsoft Entra.
 
-    Tries to grant admin consent for the Graph application permissions Terraform needs
-    (Group.ReadWrite.All, Directory.ReadWrite.All). That requires a Global Administrator /
-    Privileged Role Administrator; if consent fails the script says so and carries on.
-
-    Also enables the Fabric tenant settings the service principal needs (read/write admin APIs and
-    workspace creation) for the SPN security group, which needs a Fabric administrator.
+    Grants the service principal the Graph application permissions Terraform needs (Group.ReadWrite.All,
+    Directory.ReadWrite.All) and reads them back, gives it the Entra role Fabric Administrator, and
+    enables the Fabric tenant settings it needs (read/write admin APIs and workspace creation) for the
+    SPN security group. Together that is close to tenant-admin for whoever can run the pipeline on main:
+    protect main and the prod/global environments.
 
 .EXAMPLE
-    .\bootstrap-identity.ps1 -SubscriptionId <sub> -StateResourceGroup rg-fabricvending-tfstate `
-        -StorageAccountName <storage> -AzdoOrganization https://dev.azure.com/<your-org> `
-        -AzdoAuthSubscriptionId <sub in the DevOps tenant>
+    pwsh scripts/bootstrap-identity.ps1 -SubscriptionId <sub> -Location swedencentral `
+        -StateResourceGroup rg-fabricvending-tfstate -StorageAccountName <storage> `
+        -AzdoOrganization https://dev.azure.com/<your-org> -AzdoProject <project> `
+        -AzdoAuthSubscriptionId <sub in the DevOps organisation's tenant>
+
+.EXAMPLE
+    pwsh scripts/bootstrap-identity.ps1 -Platform github -SubscriptionId <sub> -Location swedencentral `
+        -StateResourceGroup rg-fabricvending-tfstate -StorageAccountName <storage>
 #>
 
 [CmdletBinding()]
@@ -49,7 +62,7 @@ param(
     [string] $RepoName               = "",
     [string] $AzdoAuthSubscriptionId = "",
     [string] $CapacityResourceGroup  = "rg-fabricvending-capacity",
-    [string] $Location               = "westeurope",
+    [Parameter(Mandatory)] [string] $Location,   # same region as the capacities (capacity_location)
     [string] $AppName                = "sp-fabricvending-fabric",
     [string] $IdentityName           = "id-fabricvending-pipeline",
     [string[]] $Environments         = @("acc", "prod"),
@@ -62,6 +75,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# az ad / Graph calls follow the DEFAULT subscription's tenant, whatever --subscription says, so the
+# script switches the default to -SubscriptionId and puts the user's own default back however it ends.
+$originalSubscription = & az account show --query id -o tsv 2>$null
+function Restore-Subscription {
+    if ($originalSubscription) { & az account set --subscription $originalSubscription 2>$null | Out-Null }
+}
+trap { Restore-Subscription; break }
+
+# `pwsh -File` passes "dev,acc,prod" as one string; accept both forms.
+$Environments = @($Environments | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
 if ($Platform -eq "azuredevops" -and -not $AzdoOrganization) {
     throw "-AzdoOrganization is required for -Platform azuredevops, e.g. https://dev.azure.com/<your-org>"
 }
@@ -73,6 +97,12 @@ function Invoke-Az {
     $out = & az @args
     if ($LASTEXITCODE -ne 0) { throw "az $($args -join ' ') failed" }
     return $out
+}
+
+function Write-JsonFile($Object) {
+    $file = New-TemporaryFile
+    $Object | ConvertTo-Json -Depth 10 | Set-Content -Path $file -Encoding utf8
+    return $file
 }
 
 function Get-Prop($Object, [string] $Name) {
@@ -98,10 +128,21 @@ function Invoke-Azdo {
 }
 
 $projEnc = [uri]::EscapeDataString($AzdoProject)
-$proj    = Invoke-Azdo GET "$AzdoOrganization/_apis/projects/$projEnc`?api-version=7.1"
+try { $proj = Invoke-Azdo GET "$AzdoOrganization/_apis/projects/$projEnc`?api-version=7.1" }
+catch {
+    throw "Azure DevOps project '$AzdoProject' not found in $AzdoOrganization (or this account cannot see it). Create it first: az devops project create --organization $AzdoOrganization --name `"$AzdoProject`" --visibility private"
+}
 $projId  = $proj.id
 $base    = "$AzdoOrganization/$projEnc"
-$repo    = Invoke-Azdo GET "$base/_apis/git/repositories/$([uri]::EscapeDataString($RepoName))?api-version=7.1"
+try { $repo = Invoke-Azdo GET "$base/_apis/git/repositories/$([uri]::EscapeDataString($RepoName))?api-version=7.1" }
+catch {
+    throw "Git repository '$RepoName' not found in project '$AzdoProject'. Pass -RepoName, or push the code first: git remote add azdo $AzdoOrganization/$projEnc/_git/<repo>; git push azdo main"
+}
+$hasPipelineFile = $true
+try { Invoke-Azdo GET "$base/_apis/git/repositories/$($repo.id)/items?path=/azure-pipelines.yml&api-version=7.1" | Out-Null } catch { $hasPipelineFile = $false }
+if (-not $hasPipelineFile) {
+    throw "Repository '$RepoName' has no azure-pipelines.yml on its default branch. Push the code first (git push azdo main); nothing runs until this script creates the pipelines."
+}
 
 function Grant-AllPipelines([string] $ResourceType, [string] $ResourceId) {
     Invoke-Azdo PATCH "$base/_apis/pipelines/pipelinepermissions/$ResourceType/$ResourceId`?api-version=7.1-preview.1" `
@@ -159,26 +200,54 @@ Write-Host "Role 'Reader' (service principal) -> $capacityRgId"
 Invoke-Az role assignment create --assignee-object-id $spObjectId --assignee-principal-type ServicePrincipal `
     --role Reader --scope $capacityRgId --output none | Out-Null
 
-# 4. Microsoft Graph application permissions + admin consent for the SPN (needs a privileged admin)
+# 4. Microsoft Graph application permissions for the SPN (needs a privileged admin).
+#    Granted as app role assignments through Graph and read back. `az ad app permission admin-consent`
+#    is not used: it calls a legacy endpoint that can answer success while nothing is granted,
+#    especially right after the service principal was created.
 $graphAppId = "00000003-0000-0000-c000-000000000000"
+$graphSpId  = Invoke-Az ad sp show --id $graphAppId --query id -o tsv
+$wantedRoles = [ordered]@{}
 foreach ($perm in "Group.ReadWrite.All", "Directory.ReadWrite.All") {
     $roleId = Invoke-Az ad sp show --id $graphAppId --query "appRoles[?value=='$perm'].id | [0]" -o tsv
-    Invoke-Az ad app permission add --id $appId --api $graphAppId --api-permissions "$roleId=Role" --output none | Out-Null
+    $wantedRoles[$perm] = $roleId
+    # Recorded on the app as well, so the portal shows the permissions as configured.
+    Invoke-Az ad app permission add --id $appId --api $graphAppId --api-permissions "$roleId=Role" --output none 2>$null | Out-Null
+}
+function Get-GrantedGraphRoles {
+    @(& az rest --method get --url "https://graph.microsoft.com/v1.0/servicePrincipals/$spObjectId/appRoleAssignments" `
+        --query "value[?resourceId=='$graphSpId'].appRoleId" -o tsv 2>$null) | Where-Object { $_ }
 }
 $consented = $true
-try { Invoke-Az ad app permission admin-consent --id $appId --output none | Out-Null }
-catch { $consented = $false }
+$granted = @(Get-GrantedGraphRoles)
+foreach ($perm in $wantedRoles.Keys) {
+    if ($granted -contains $wantedRoles[$perm]) { continue }
+    Write-Host "Granting Graph permission $perm to the service principal"
+    $file = Write-JsonFile @{ principalId = $spObjectId; resourceId = $graphSpId; appRoleId = $wantedRoles[$perm] }
+    try {
+        # A brand-new service principal can take a few seconds to be usable as a principal.
+        $done = $false
+        for ($i = 0; $i -lt 6 -and -not $done; $i++) {
+            if ($i) { Start-Sleep -Seconds 5 }
+            & az rest --method post --url "https://graph.microsoft.com/v1.0/servicePrincipals/$spObjectId/appRoleAssignments" `
+                --headers "Content-Type=application/json" --body "@$file" --output none 2>$null
+            $done = ($LASTEXITCODE -eq 0)
+        }
+        # A POST can fail after the server applied it (then a retry says "already exists"): re-read first.
+        if (-not $done) { $done = @(Get-GrantedGraphRoles) -contains $wantedRoles[$perm] }
+        if (-not $done) { $consented = $false; Write-Host "  Could not grant $perm (needs Global Administrator or Privileged Role Administrator, activated)." }
+    }
+    finally { Remove-Item $file -Force -ErrorAction SilentlyContinue }
+}
 if ($consented) {
-    # The call returning is not proof: read the app role assignments back. They can lag by a few seconds.
-    $granted = 0
-    for ($i = 0; $i -lt 6 -and $granted -lt 2; $i++) {
-        Start-Sleep -Seconds ($(if ($i -eq 0) { 0 } else { 5 }))
-        $granted = @((Invoke-Az rest --method get --url "https://graph.microsoft.com/v1.0/servicePrincipals/$spObjectId/appRoleAssignments" --query "value[].appRoleId" -o tsv)).Where({ $_ }).Count
+    # Read back: only what Graph returns counts.
+    $missing = @()
+    for ($i = 0; $i -lt 6; $i++) {
+        if ($i) { Start-Sleep -Seconds 5 }
+        $granted = @(Get-GrantedGraphRoles)
+        $missing = @($wantedRoles.Keys | Where-Object { $granted -notcontains $wantedRoles[$_] })
+        if (-not $missing) { break }
     }
-    if ($granted -lt 2) {
-        $consented = $false
-        Write-Host "Admin consent did not show up in Graph after retries ($granted of 2 permissions granted)."
-    }
+    if ($missing) { $consented = $false; Write-Host "Graph permissions not visible after retries: $($missing -join ', ')" }
 }
 
 # 5. Security group for the Fabric tenant setting "Service principals can use Fabric APIs"
@@ -226,9 +295,20 @@ try {
         $setting = $current | Where-Object { $_.settingName -eq $name }
         if (-not $setting) { throw "Tenant setting $name not found" }
         $groups = @(Get-Prop $setting "enabledSecurityGroups" | Where-Object { $_ })
-        if ($setting.enabled -and ($groups.Count -eq 0 -or ($groups | Where-Object { $_.graphId -eq $groupId }))) { continue }
+        # Groups deleted from Entra (for example by an earlier onboarding's cleanup) stay listed on the
+        # setting, and Fabric rejects any update that still names them. Leave them out.
+        # Only a definite "not found" counts as deleted; any other error stops, so a throttled or failed
+        # lookup never strips a live group from a tenant-wide setting.
+        $live = @($groups | Where-Object {
+                $out = & az rest --method get --url "https://graph.microsoft.com/v1.0/groups/$($_.graphId)?`$select=id" --output none 2>&1
+                if ($LASTEXITCODE -eq 0) { $true }
+                elseif ("$out" -match "Request_ResourceNotFound|Not Found|404") { Write-Host "  $name lists deleted group $($_.name) ($($_.graphId)); removing it"; $false }
+                else { throw "Could not check group $($_.graphId) on tenant setting ${name}: $out" }
+            })
+        $stale = $live.Count -ne $groups.Count
+        if (-not $stale -and $setting.enabled -and ($groups.Count -eq 0 -or ($groups | Where-Object { $_.graphId -eq $groupId }))) { continue }
         Write-Host "Enabling Fabric tenant setting $name for group $FabricSpnGroupName"
-        $newGroups = @($groups | ForEach-Object { @{ graphId = $_.graphId; name = $_.name } }) + @(@{ graphId = $groupId; name = $FabricSpnGroupName })
+        $newGroups = @($live | Where-Object { $_.graphId -ne $groupId } | ForEach-Object { @{ graphId = $_.graphId; name = $_.name } }) + @(@{ graphId = $groupId; name = $FabricSpnGroupName })
         $file = New-TemporaryFile
         try {
             @{ enabled = $true; enabledSecurityGroups = $newGroups } | ConvertTo-Json -Depth 5 | Set-Content -Path $file -Encoding utf8
@@ -281,23 +361,32 @@ function Ensure-ServiceConnection {
         throw "Service connection '$Name' did not return a federation issuer/subject. Open it in Azure DevOps (Project settings > Service connections) and add the federated credential from its details manually, then re-run."
     }
 
+    # Matched on name AND subject: a credential left by an earlier onboarding (another project or
+    # organisation) has the same name but a different subject and would make every run fail with
+    # AADSTS700213. Such a credential is replaced.
     $credName = "azdo-$Name"
     if ($Kind -eq "app") {
-        $have = Invoke-Az ad app federated-credential list --id $appObjectId --query "[].name" -o tsv
-        if ($have -notcontains $credName) {
+        $existing = Invoke-Az ad app federated-credential list --id $appObjectId --query "[?name=='$credName'] | [0]" -o json | ConvertFrom-Json
+        if ($existing -and ($existing.subject -ne $subject -or $existing.issuer -ne $issuer)) {
+            Write-Host "Federated credential on app $credName has subject $($existing.subject); replacing it with $subject"
+            Invoke-Az ad app federated-credential delete --id $appObjectId --federated-credential-id $existing.id --output none | Out-Null
+            $existing = $null
+        }
+        if (-not $existing) {
             Write-Host "Adding federated credential on app: $credName"
-            $file = New-TemporaryFile
-            try {
-                @{ name = $credName; issuer = $issuer; subject = $subject; audiences = @("api://AzureADTokenExchange") } |
-                    ConvertTo-Json | Set-Content -Path $file -Encoding utf8
-                Invoke-Az ad app federated-credential create --id $appObjectId --parameters "@$file" --output none | Out-Null
-            }
+            $file = Write-JsonFile @{ name = $credName; issuer = $issuer; subject = $subject; audiences = @("api://AzureADTokenExchange") }
+            try { Invoke-Az ad app federated-credential create --id $appObjectId --parameters "@$file" --output none | Out-Null }
             finally { Remove-Item $file -Force -ErrorAction SilentlyContinue }
         }
     }
     else {
-        $have = Invoke-Az identity federated-credential list --identity-name $IdentityName -g $StateResourceGroup --query "[].name" -o tsv
-        if ($have -notcontains $credName) {
+        $existing = Invoke-Az identity federated-credential list --identity-name $IdentityName -g $StateResourceGroup --query "[?name=='$credName'] | [0]" -o json | ConvertFrom-Json
+        if ($existing -and ($existing.subject -ne $subject -or $existing.issuer -ne $issuer)) {
+            Write-Host "Federated credential on managed identity $credName has subject $($existing.subject); replacing it with $subject"
+            Invoke-Az identity federated-credential delete --name $credName --identity-name $IdentityName -g $StateResourceGroup --yes --output none | Out-Null
+            $existing = $null
+        }
+        if (-not $existing) {
             Write-Host "Adding federated credential on managed identity: $credName"
             Invoke-Az identity federated-credential create --name $credName --identity-name $IdentityName -g $StateResourceGroup `
                 --issuer $issuer --subject $subject --audiences "api://AzureADTokenExchange" --output none | Out-Null
@@ -437,31 +526,39 @@ foreach ($pair in @(
 }
 }
 
+Restore-Subscription
+
 Write-Host ""
 Write-Host "Done."
-Write-Host "  Managed identity (Azure): $IdentityName (client id $miClientId)"
-Write-Host "  Service principal (Fabric/Entra): $AppName (client id $appId)"
-Write-Host "  Service principal object id (add to capacity admins in the tfvars): $spObjectId"
+Write-Host "  Managed identity (Azure):         $IdentityName (client id $miClientId)"
+Write-Host "  Service principal (Fabric/Entra): $AppName (client id $appId, object id $spObjectId)"
 if ($Platform -eq "azuredevops") {
-    Write-Host "  Environments: $($Environments -join ', ')"
     Write-Host "  Pipelines: $AzdoOrganization/$projEnc/_build"
-} else {
-    Write-Host "  Next: run scripts/bootstrap-github.ps1 to wire GitHub Actions."
 }
-Write-Host ""
-Write-Host "Remaining steps that cannot be scripted from here:"
-if (-not $fabricAdminAssigned) {
-    Write-Host " - Assign the Entra role 'Fabric Administrator' to service principal '$AppName' (object id $spObjectId):"
-    Write-Host "   Entra admin center > Roles & administrators > Fabric Administrator > Add assignments."
-}
+
+$todo = @()
 if (-not $consented) {
-    Write-Host " 1. A Global/Privileged Role Administrator must grant admin consent:"
-    Write-Host "      az ad app permission admin-consent --id $appId"
+    $todo += "Graph permissions (Group.ReadWrite.All, Directory.ReadWrite.All) are not granted. Activate Global Administrator or Privileged Role Administrator (PIM) and re-run this script."
+}
+if (-not $fabricAdminAssigned) {
+    $todo += "The Entra role 'Fabric Administrator' is not assigned to '$AppName'. Activate Global Administrator or Privileged Role Administrator and re-run this script."
 }
 if (-not $tenantSettingsEnabled) {
-    Write-Host " - A Fabric administrator must enable these tenant settings for group '$FabricSpnGroupName':"
-    Write-Host "   $($requiredTenantSettings -join ', ')"
-    Write-Host "   (Fabric admin portal > Tenant settings > Developer settings / Admin API settings), or re-run this script as a Fabric administrator."
+    $todo += "The Fabric tenant settings $($requiredTenantSettings -join ', ') are not enabled for group '$FabricSpnGroupName'. Activate Fabric Administrator (or Global Administrator) and re-run this script."
 }
-Write-Host " - The service principal '$AppName' must be a capacity admin so Terraform can assign workspaces to the capacity:"
-Write-Host "   put its object id ($spObjectId) in capacity_extra_admins in each environment tfvars."
+Write-Host ""
+if ($todo) {
+    Write-Host "Not done yet (the first deploy fails until these are):"
+    $todo | ForEach-Object { Write-Host " - $_" }
+} else {
+    Write-Host "Permissions: Graph permissions granted, Fabric Administrator assigned, tenant settings enabled (all read back)."
+}
+Write-Host ""
+Write-Host "Next:"
+Write-Host " 1. Put the service principal object id in capacity_extra_admins in every parameters/environments/<env>.tfvars:"
+Write-Host "      capacity_extra_admins = [`"$spObjectId`"]"
+if ($Platform -eq "azuredevops") {
+    Write-Host " 2. Commit the tfvars and your workspace files on a branch and open a pull request. The plan runs on it; merging applies."
+} else {
+    Write-Host " 2. Run scripts/bootstrap-github.ps1 to wire GitHub Actions."
+}
