@@ -403,6 +403,10 @@ Group names are `<group_prefix>_<WORKSPACE_NAME>_<ENV>_<ROLE>`, for example `FAB
 | `aad_group_object_ids` | Workspace role key → Entra group object id |
 | `workspace_storage_formats` | Workspace id → storage format (for `set-storage-format.sh`) |
 
+## Contributing
+
+Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 MIT
