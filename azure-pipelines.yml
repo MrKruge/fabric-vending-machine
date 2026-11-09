@@ -1,6 +1,10 @@
 # Terraform only ever runs here. Every pull request gets a plan for each environment (via the
 # build-validation policy scripts/bootstrap-identity.ps1 creates); a push to main plans and
-# applies acc first, then prod. Approvals/checks on the fabricvending-prod environment gate prod.
+# applies acc first, then plans prod (after acc applied, so it sees what acc created) and applies
+# it. Approvals/checks on the fabricvending-prod environment gate prod.
+#
+# Pushing this repository before bootstrap-identity.ps1 runs is safe: Azure DevOps only runs a
+# pipeline once it has been created, and the bootstrap creates it.
 
 # batch: a push to main waits for the run in progress and then starts once, instead of two deploys
 # resuming and pausing the same capacity at the same time.
@@ -21,4 +25,5 @@ stages:
   - template: .azuredevops/stages/environment.yml
     parameters:
       environment: prod
+      planAfter: Apply_acc
       applyDependsOn: [Apply_acc]

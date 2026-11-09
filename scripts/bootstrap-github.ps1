@@ -9,7 +9,10 @@
     service principal and the state storage). Idempotent. Use -DryRun to print what would happen
     without changing anything.
 
-    Needs: `az` logged in to the tenant, `gh` logged in with admin rights on the repository.
+    Needs: `az` signed in to the tenant, `gh` signed in with admin rights on the repository and the
+    `workflow` scope (gh auth login -s workflow, or gh auth refresh -s workflow). The repository must
+    exist; it may be empty. Pushing the code is safe at any point: the workflows do nothing until
+    parameters/environments/<env>.tfvars exist.
 
     Federated credential subjects. GitHub issues the OIDC subject in one of two shapes. Repositories
     created after 2026-07-15, or opted in, use immutable subjects that embed the owner and repository
@@ -21,12 +24,17 @@
       pushes to main         <prefix>:ref:refs/heads/main            (plan on push)
       environment acc/prod/global   <prefix>:environment:<name>      (apply jobs)
 
-    GitHub environments: acc, prod, global are created. Required reviewers need GitHub Team/Enterprise
-    for a private repository (or a public repository); pass -ReviewerLogin to set one where allowed.
+    GitHub environments: acc, prod, global are created. Pass -ReviewerLogin to require a reviewer on
+    prod and global. Required reviewers need a public repository, or GitHub Team/Enterprise for a
+    private one; without them prod applies right after acc. The script reads the environments back and
+    says which gate is really in place.
+
+    A federated credential with the right name but another subject (left by an earlier onboarding of
+    another repository) is replaced. Your default `az` subscription is switched for the run and restored.
 
 .EXAMPLE
-    .\bootstrap-github.ps1 -SubscriptionId <sub> -StateResourceGroup rg-fabricvending-tfstate `
-        -StorageAccountName <storage> -Repository MyOrg/fabric-vending -DryRun
+    pwsh scripts/bootstrap-github.ps1 -SubscriptionId <sub> -StateResourceGroup rg-fabricvending-tfstate `
+        -StorageAccountName <storage> -Repository <owner>/<repo> -ReviewerLogin <your-github-login> -DryRun
 #>
 
 [CmdletBinding()]
@@ -46,6 +54,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# az ad / Graph calls follow the DEFAULT subscription's tenant, whatever --subscription says. Switch the
+# default to -SubscriptionId for the run and put the user's own default back however it ends.
+$originalSubscription = & az account show --query id -o tsv 2>$null
+function Restore-Subscription {
+    if ($originalSubscription) { & az account set --subscription $originalSubscription 2>$null | Out-Null }
+}
+trap { Restore-Subscription; break }
+& az account set --subscription $SubscriptionId 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Subscription $SubscriptionId is not visible to any account signed in to az (az account list --all)." }
+# `pwsh -File` passes "dev,acc,prod" as one string; accept both forms.
+$Environments = @($Environments | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
 $GlobalScope = "global"
 $issuer      = "https://token.actions.githubusercontent.com"
 
@@ -63,14 +83,20 @@ function Step([string] $Text) { Write-Host ($(if ($DryRun) { "[dry-run] " } else
 
 if ($Repository -notmatch '^[^/\s]+/[^/\s]+$') { throw "-Repository must be owner/name, got '$Repository'" }
 
+# ── GitHub access ───────────────────────────────────────────────────────────
+Invoke-Gh repo view $Repository --json name | Out-Null
+$scopes = (& gh api -i user 2>$null | Select-String -Pattern '^x-oauth-scopes:' | Select-Object -First 1)
+if ($scopes -and "$scopes" -notmatch '\bworkflow\b') {
+    Write-Host "Note: the gh token lacks the 'workflow' scope, so pushing .github/workflows will be refused. Run: gh auth refresh -h github.com -s workflow"
+}
+
 # ── Azure facts ─────────────────────────────────────────────────────────────
-Invoke-Az account set --subscription $SubscriptionId | Out-Null
-$tenantId = Invoke-Az account show --query tenantId -o tsv
+$tenantId = Invoke-Az account show --subscription $SubscriptionId --query tenantId -o tsv
 
 $appId = Invoke-Az ad app list --display-name $AppName --query "[0].appId" -o tsv
 if (-not $appId) { throw "App registration '$AppName' not found. Run bootstrap-identity.ps1 first." }
 $appObjectId = Invoke-Az ad app show --id $appId --query id -o tsv
-$miClientId  = Invoke-Az identity list -g $StateResourceGroup --query "[?name=='$IdentityName'].clientId | [0]" -o tsv
+$miClientId  = Invoke-Az identity list --subscription $SubscriptionId -g $StateResourceGroup --query "[?name=='$IdentityName'].clientId | [0]" -o tsv
 if (-not $miClientId) { throw "Managed identity '$IdentityName' not found in $StateResourceGroup. Run bootstrap-identity.ps1 first." }
 
 # ── Which OIDC subject shape does this repository use? ──────────────────────
@@ -93,12 +119,17 @@ $subjects = [ordered]@{
 }
 foreach ($e in (@($Environments) + $GlobalScope)) { $subjects["gh-env-$e"] = "${prefix}:environment:$e" }
 
+# Matched on name AND subject: a credential with this name from an earlier onboarding of another
+# repository has a different subject and is replaced, otherwise every run fails with AADSTS700213.
 function Ensure-Credential {
     param([string] $Kind, [string] $Name, [string] $Subject)
     if ($Kind -eq "app") {
-        $have = @(Invoke-Az ad app federated-credential list --id $appObjectId --query "[].name" -o tsv)
-        if ($have -contains $Name) { Write-Host "  exists (app)      $Name"; return }
-        Step "add credential on app        $Name -> $Subject"
+        $existing = Invoke-Az ad app federated-credential list --id $appObjectId --query "[?name=='$Name'] | [0]" -o json | ConvertFrom-Json
+        if ($existing -and $existing.subject -eq $Subject -and $existing.issuer -eq $issuer) { Write-Host "  exists (app)      $Name"; return }
+        if ($existing) {
+            Step "replace credential on app    $Name ($($existing.subject) -> $Subject)"
+            if (-not $DryRun) { Invoke-Az ad app federated-credential delete --id $appObjectId --federated-credential-id $existing.id --output none | Out-Null }
+        } else { Step "add credential on app        $Name -> $Subject" }
         if ($DryRun) { return }
         $file = New-TemporaryFile
         try {
@@ -109,11 +140,15 @@ function Ensure-Credential {
         finally { Remove-Item $file -Force -ErrorAction SilentlyContinue }
     }
     else {
-        $have = @(Invoke-Az identity federated-credential list --identity-name $IdentityName -g $StateResourceGroup --query "[].name" -o tsv)
-        if ($have -contains $Name) { Write-Host "  exists (identity) $Name"; return }
-        Step "add credential on identity   $Name -> $Subject"
+        $idArgs = @("--identity-name", $IdentityName, "-g", $StateResourceGroup, "--subscription", $SubscriptionId)
+        $existing = Invoke-Az identity federated-credential list @idArgs --query "[?name=='$Name'] | [0]" -o json | ConvertFrom-Json
+        if ($existing -and $existing.subject -eq $Subject -and $existing.issuer -eq $issuer) { Write-Host "  exists (identity) $Name"; return }
+        if ($existing) {
+            Step "replace credential on identity $Name ($($existing.subject) -> $Subject)"
+            if (-not $DryRun) { Invoke-Az identity federated-credential delete --name $Name @idArgs --yes --output none | Out-Null }
+        } else { Step "add credential on identity   $Name -> $Subject" }
         if ($DryRun) { return }
-        Invoke-Az identity federated-credential create --name $Name --identity-name $IdentityName -g $StateResourceGroup `
+        Invoke-Az identity federated-credential create --name $Name @idArgs `
             --issuer $issuer --subject $Subject --audiences "api://AzureADTokenExchange" --output none | Out-Null
     }
 }
@@ -162,9 +197,26 @@ foreach ($e in (@($Environments) + $GlobalScope)) {
 
 Write-Host ""
 Write-Host "Done$(if ($DryRun) { ' (dry run: nothing was changed)' })."
-Write-Host "Remaining manual steps:"
-Write-Host " - Run scripts/bootstrap-identity.ps1 first if you have not (it creates the identities and the Entra/Fabric permissions)."
-if (-not $ReviewerLogin) {
-    Write-Host " - Add required reviewers to the 'prod' and 'global' GitHub environments (or pass -ReviewerLogin)."
+
+# Say which gate is really there, not which one was asked for (read-only, also in a dry run).
+if ($true) {
+    Write-Host ""
+    Write-Host "Approval gates (read back from GitHub$(if ($DryRun) { ', current state' })):"
+    $ungated = @()
+    foreach ($e in @("prod", $GlobalScope)) {
+        $rules = & gh api "repos/$Repository/environments/$e" --jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length' 2>$null
+        if ($LASTEXITCODE -eq 0 -and [int]$rules -gt 0) { Write-Host "  $e : a reviewer must approve before it applies" }
+        else { Write-Host "  $e : NO reviewer, applies without approval"; $ungated += $e }
+    }
+    if ($ungated) {
+        Write-Host "  A push to main applies acc and then prod with nobody approving. Add reviewers (re-run with"
+        Write-Host "  -ReviewerLogin), which needs a public repository or GitHub Team/Enterprise, or accept it knowingly."
+    }
 }
-Write-Host " - Push to main to run the first plan; nothing applies until the environments' reviewers approve."
+Restore-Subscription
+Write-Host ""
+Write-Host "Next:"
+Write-Host " 1. Push the code to $Repository if it is not there yet (git push <remote> main). That is safe: the"
+Write-Host "    workflows skip until parameters/environments/acc.tfvars and prod.tfvars exist."
+Write-Host " 2. Commit those tfvars (with capacity_extra_admins set) and your workspace files on a branch and open a"
+Write-Host "    pull request. validate and the plan run on it; merging applies."

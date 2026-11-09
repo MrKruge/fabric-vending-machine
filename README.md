@@ -12,337 +12,244 @@
   <img alt="Terraform 1.12+" src="https://img.shields.io/badge/Terraform-%E2%89%A5%201.12-7B42BC?logo=terraform&logoColor=white">
   <img alt="Fabric provider 1.11+" src="https://img.shields.io/badge/microsoft%2Ffabric-%E2%89%A5%201.11-0FB5A0">
   <img alt="Azure DevOps pipelines" src="https://img.shields.io/badge/CI%2FCD-Azure%20DevOps-0078D7?logo=azuredevops&logoColor=white">
+  <img alt="GitHub Actions" src="https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
-Terraform for automating Microsoft Fabric workspace provisioning. It is fully parameterized, with no hardcoded tenant values: drop in your own `.tfvars` files and it works against any Fabric tenant.
+Terraform for Microsoft Fabric: capacities, workspaces, their Entra security groups and role assignments, domains and tenant settings. Nothing is hardcoded: your tenant lives in `.tfvars` files you create, and it runs against any Fabric tenant from Azure DevOps or GitHub Actions.
 
 ## How it runs
 
-Terraform never runs from a laptop. Two one-time bootstrap scripts prepare the identities, then three pipelines do everything else:
+Terraform never runs from a laptop. A few one-time bootstrap scripts prepare state storage and two identities, then three pipelines do everything else:
 
-| Pipeline | What it does | Triggers |
+| Pipeline | What it does | Runs on |
 |---|---|---|
-| `fabricvending-validate` | Offline checks: format, validate, mocked-provider tests for both stacks, shell syntax. | Every PR (required build policy). |
-| `fabricvending-deploy` | Workspaces, role groups, capacities. Plans acc and prod, applies acc, then prod after an approval. | PR plan, then push to `main`. |
-| `fabricvending-tenant-settings` | Tenant-wide Fabric settings in their own stack and state, behind their own approval. | Only when the settings or the stack change. |
+| `validate` | Offline checks: format, validate, mocked-provider tests for both stacks, shell syntax. | Every pull request (required). |
+| `deploy` | Workspaces, role groups, capacities. A pull request gets a plan per environment. A push to `main` plans and applies `acc`, then plans and applies `prod` (planned after acc, so it sees what acc created). | Pull requests and pushes to `main`. |
+| `tenant-settings` | Tenant-wide Fabric settings in their own stack and state, behind their own approval. | Only when the settings or that stack change. |
 
-Each pipeline authenticates with workload identity federation, so no secret exists anywhere: a user-assigned managed identity for Azure and a service principal for the Fabric and Graph APIs. Capacities are resumed before a plan or apply and paused again afterwards, so they only run while Terraform works.
+Authentication is workload identity federation, so no secret exists anywhere: a user-assigned managed identity for Azure and a service principal for the Fabric and Microsoft Graph APIs. Capacities are resumed before a plan or apply and paused afterwards, so they only bill while Terraform works.
 
-**Status:** proven end to end on Azure DevOps against a real tenant (workspaces, groups, capacities, 174 tenant settings). GitHub Actions workflows and an AI-guided onboarding (`/onboard`) are in the repo; the GitHub path has not run live yet.
+**Status:** onboarded end to end from a fresh clone on both Azure DevOps and GitHub Actions, in two different tenants, in November 2026. Everything that went wrong on the way is fixed in the scripts and covered below.
 
 ## What it provisions
 
 For each workspace entry you define:
 
-- A **Fabric workspace** (optionally assigned to a capacity)
-- **4 AAD security groups** (`Admin`, `Contributor`, `Viewer`, `Member`) following a consistent naming convention
-- **Fabric workspace role assignments** linking those groups to the workspace
-- Optional **Git integration** (Azure DevOps or GitHub) on DEV workspaces
-- Optional **Fabric domain assignment**
-- Optional **owner group nesting** (e.g. a central "Fabric Admins" group)
-- Optional **deployment SPN admin** grant for CI/CD pipelines
+- a **Fabric workspace**, assigned to the environment's capacity
+- **4 Entra security groups** (`Admin`, `Contributor`, `Viewer`, `Member`) with a fixed naming convention
+- **workspace role assignments** linking those groups to the workspace
+- the workspace's **Fabric domain** (created by the first environment, looked up by the others) and the domain assignment
+- optional: **Git integration** (Azure DevOps or GitHub), usually on a DEV workspace
+- optional: an **owner group** nested into each Admin group, and a **deployment service principal** as admin
 
-Domains are tenant-wide resources. The module creates them in your first/DEV stage and looks them up by name in subsequent stages — no hardcoded IDs required.
-
-## Architecture
+Per environment it also creates the **Fabric capacity** (F2 and up; F0 through a script, see [F0 capacities](#f0-capacities)).
 
 ```
-Fabric Tenant
-├── Capacity
-│   ├── Workspace: Finance DEV  ──── Domain: Finance
-│   │   ├── AAD Group: FABRIC_WORKSPACE_FINANCE_DEV_ADMIN
-│   │   ├── AAD Group: FABRIC_WORKSPACE_FINANCE_DEV_CONTRIBUTOR
-│   │   ├── AAD Group: FABRIC_WORKSPACE_FINANCE_DEV_VIEWER
-│   │   └── AAD Group: FABRIC_WORKSPACE_FINANCE_DEV_MEMBER
-│   ├── Workspace: Sales DEV    ──── Domain: Sales
-│   └── ...
-├── Workspace: Finance UAT
-├── Workspace: Finance          ──── (PROD — no suffix)
-└── ...
+Fabric tenant
+├── Domain: Finance
+├── Capacity (acc)
+│   └── Workspace: Finance UAT ── domain Finance
+│       ├── Entra group FABRIC_WORKSPACE_FINANCE_UAT_ADMIN
+│       ├── Entra group FABRIC_WORKSPACE_FINANCE_UAT_CONTRIBUTOR
+│       ├── Entra group FABRIC_WORKSPACE_FINANCE_UAT_VIEWER
+│       └── Entra group FABRIC_WORKSPACE_FINANCE_UAT_MEMBER
+└── Capacity (prod)
+    └── Workspace: Finance ────── domain Finance   (PROD has no suffix)
 ```
+
+The pipelines deploy two environments, `acc` (the UAT stage) and `prod` (PROD). A DEV stage is optional: see [Adding a DEV environment](#adding-a-dev-environment).
 
 ## Getting started
 
-The quickest way is to let your AI assistant do the typing: open the repo in Claude Code and run `/onboard`
-(other assistants: point them at [AGENTS.md](AGENTS.md)). It asks about eight things, runs the read-only checks,
-writes your tfvars and runs the bootstrap scripts, each only after you confirm it. The manual path is below.
+### The quick way: let an AI assistant drive
 
-| Step | Azure DevOps | GitHub Actions |
-|---|---|---|
-| 1. State storage | `scripts/bootstrap-backend.ps1` | `scripts/bootstrap-backend.ps1` |
-| 2. Identities and permissions | `scripts/bootstrap-identity.ps1 -AzdoOrganization https://dev.azure.com/<org> ...` | `scripts/bootstrap-identity.ps1 -Platform github` |
-| 3. Wire the CI system | done by step 2 (service connections, variable groups, pipelines, approvals) | `scripts/bootstrap-github.ps1 -Repository <owner/name>` (try `-DryRun` first) |
-| 4. Two admin steps | Graph admin consent, Fabric Administrator role (the scripts tell you if they could not do it) | same |
+Open the repository in Claude Code and run `/onboard` (other assistants: point them at [AGENTS.md](AGENTS.md)). It finds out what it can, asks about the rest, runs the read-only checks, writes your tfvars, and runs each bootstrap script only after you confirm it by name. It follows exactly the steps below.
 
-The Azure DevOps path has run against a real tenant. The GitHub workflows (`.github/workflows/`) are written
-against the provider and GitHub documentation and pass offline checks, but they have not run live yet.
+### What you need
 
-## Prerequisites
+**Tools** on the machine you bootstrap from:
 
-1. A **Microsoft Fabric capacity** (F SKU or P SKU)
-2. A **Service Principal** with:
-   - `Fabric Administrator` or capacity/workspace admin rights in Fabric
-   - `Groups.ReadWrite.All` and `Directory.ReadWrite.All` in Azure AD
-3. **Terraform >= 1.12.0** (the azurerm backend only supports Azure DevOps OIDC from 1.12)
-4. **Fabric provider >= 1.11** — uses `microsoft/fabric`
-
-## Quick start
-
-### 1. Clone and initialize
-
-```bash
-git clone https://<your-org>@dev.azure.com/<your-org>/Fabric%20Vending/_git/Fabric%20Vending
-cd "Fabric Vending"
-terraform init
-```
-
-### 2. Configure your backend
-
-For local testing you can skip this step and use the default local backend.
-
-For a real deployment, provision an Azure Storage Account for state first:
-
-```powershell
-.\scripts\bootstrap-backend.ps1 `
-    -SubscriptionId "00000000-0000-0000-0000-000000000000" `
-    -StorageAccountName "stfabricvendingtf001"
-```
-
-The script writes `backend.generated.tf` (gitignored) for you, then run `terraform init -reconfigure`.
-
-#### F0 capacity (flag: `capacity_sku = "F0"`)
-
-The `azurerm` provider only accepts `F2` and up. For anything else Azure offers (for example `F0`, available in a few regions), create the capacity through ARM and let Terraform look it up by name:
-
-```powershell
-.\scripts\bootstrap-capacity.ps1 `
-    -SubscriptionId "00000000-0000-0000-0000-000000000000" `
-    -CapacityName "fabvendingdemo" -Sku F0 -Location westcentralus `
-    -AdminEmail "you@example.com"
-```
-
-It registers `Microsoft.Fabric`, creates the capacity and pauses it (use `-LeaveRunning` to skip the pause). Then set `create_capacity = true`, `capacity_sku = "F0"` and `capacity_name = "fabvendingdemo"` in your tfvars: Terraform skips creating the capacity and looks the script-created one up by name. For every other SKU (F2 and up) leave the script out and let Terraform create the capacity (`create_capacity = true`). Alternatively, point at any existing capacity with `fabric_capacity_name`. Resume a paused capacity before applying anything that touches workspace content.
-
-### Deploying through the pipeline (the intended path)
-
-Terraform builds all infrastructure, including the Fabric capacities, and runs only in Azure Pipelines (`azure-pipelines.yml`): every pull request gets a plan per environment (build-validation policies on `main`), and a push to `main` plans and applies `acc`, then `prod` behind an approval on the `fabricvending-prod` environment. The pipeline resumes the capacity before an apply and pauses it afterwards.
-
-Bootstrap only prepares what Terraform and the pipeline need to start. You run these by hand, once:
-
-1. `scripts/preflight.ps1`: read-only checks for the common first-run blockers
-2. `scripts/bootstrap-backend.ps1`: resource group + storage account for Terraform state
-3. Push the code to the Azure DevOps repo (the pipelines need `azure-pipelines.yml` to exist)
-4. `scripts/bootstrap-identity.ps1`: the two identities and their permissions, the empty capacity resource group, and per environment (`acc`, `prod`) the service connections, variable group and pipeline environment, plus the pipelines and PR policies
-
-`scripts/bootstrap-capacity.ps1` is only for SKUs the azurerm provider rejects (F0); for F2 and up leave it out and let Terraform create the capacity (`create_capacity = true` in `parameters/environments/<env>.tfvars`).
-
-Environments live in `parameters/environments/<env>.tfvars` (IDs only, never secrets): `acc` maps to the `UAT` stage and `prod` to `PROD`. After the identity script runs, put the service principal object id it prints into `capacity_extra_admins` so the pipeline can assign workspaces to the capacity.
-
-Two identities, each only as powerful as it needs to be:
-
-| Identity | Used for | Why |
-|---|---|---|
-| User-assigned **managed identity** | State storage, capacity create/pause/resume (everything in Azure) | Roles are plain Azure RBAC |
-| **Service principal** (app registration) | Fabric and Microsoft Graph APIs (workspaces, roles, groups) | These APIs cannot use a managed identity from a pipeline |
-
-Then commit `parameters/environments/<env>.tfvars` (IDs only, never secrets) and your workspace definitions. Two things cannot be scripted: Entra admin consent for the Graph permissions (needs a Global or Privileged Role Administrator), and the Fabric tenant setting "Service principals can use Fabric APIs" (needs a Fabric administrator). The identity script prints exactly what is still missing.
-
-### 3. Configure authentication
-
-Three options — pick one:
-
-**Option A — OIDC / Workload Identity Federation (recommended for CI/CD, no secret)**
-
-The shipped pipeline already does this: `.azuredevops/steps/terraform.yml` passes the pipeline's OIDC token and the IDs of two Azure DevOps service connections (workload identity federation). `providers.tf` binds `azurerm` to the managed identity (`azure_client_id`, `azure_service_connection_id`) and `azuread`/`fabric` to the service principal (`fabric_spn_client_id`, `fabric_service_connection_id`). Leave `fabric_spn_client_secret` unset. For a single-identity setup, set only `fabric_spn_client_id` and `azurerm` uses it too.
-
----
-
-**Option B — Client secret (if OIDC is not available)**
-
-Store the secret in **Azure Key Vault** (Azure DevOps variable group) or a pipeline secret variable — never in pipeline YAML or tfvars files. Inject at runtime:
-
-```bash
-export TF_VAR_fabric_spn_client_id="<your-spn-client-id>"
-export TF_VAR_fabric_spn_client_secret="<from-key-vault-or-pipeline-secret>"
-```
-
----
-
-**Option C — Azure CLI (local dev only)**
-
-```bash
-az login
-# Leave both SPN variables unset — the provider falls back to your CLI session.
-```
-
-### 4. Create your environment tfvars
-
-Copy the example and fill in your values:
-
-```bash
-cp parameters/environments/dev.tfvars.example parameters/environments/dev.tfvars
-# edit dev.tfvars with your tenant ID, capacity ID, etc.
-```
-
-### 5. Create your workspace parameter files
-
-Copy an example workspace file:
-
-```bash
-cp parameters/workspaces/examples/example-finance.tfvars parameters/workspaces/my-workspace.tfvars
-# edit with your workspace name and domain
-```
-
-### 6. Plan and apply
-
-Merge all workspace files together using `-var-file` flags:
-
-```bash
-terraform plan \
-  -var-file="parameters/environments/dev.tfvars" \
-  -var-file="parameters/workspaces/my-workspace.tfvars"
-
-terraform apply \
-  -var-file="parameters/environments/dev.tfvars" \
-  -var-file="parameters/workspaces/my-workspace.tfvars"
-```
-
-For multiple workspaces, add more `-var-file` arguments — Terraform merges maps automatically:
-
-```bash
-terraform apply \
-  -var-file="parameters/environments/dev.tfvars" \
-  -var-file="parameters/workspaces/finance.tfvars" \
-  -var-file="parameters/workspaces/sales.tfvars" \
-  -var-file="parameters/workspaces/operations.tfvars"
-```
-
-## Prerequisites and gotchas
-
-Run `scripts/preflight.ps1` first. It changes nothing and checks the first four items below. These are the things that tripped up real first runs:
-
-- **Power BI Service disabled in the tenant.** Fabric API sign-ins fail with `AADSTS500014 ... service principal for resource ... is disabled`. A Global Administrator enables it: Entra > Enterprise applications > Power BI Service > Properties > "Enabled for users to sign-in" = Yes.
-- **Capacity admin cannot be a guest.** The `#` in a guest UPN (`name_domain.com#EXT#@tenant.onmicrosoft.com`) gives `Invalid principal name`, and the guest's object ID gives `All provided principals must be existing, user or service principals`. Use a native member account, or ask a tenant admin to remove `#EXT#` from the guest's UPN.
-- **`Microsoft.Fabric` must be registered** on the subscription. `bootstrap-identity.ps1` does it, because the pipeline identity has no subscription-level rights and the azurerm provider is set not to auto-register providers (`resource_provider_registrations = "none"`).
-- **Capacity region.** The region must suit the tenant's geography, and a busy region can be full; pick another in the same geography. `Location needs to match the PowerBI cluster location` means the region is wrong for the tenant. Check availability per SKU: `az rest --method get --url "https://management.azure.com/subscriptions/<sub>/providers/Microsoft.Fabric/skus?api-version=2023-11-01"`.
-- **F0 is rare.** It is only offered in West Central US and two canary regions, so it needs a tenant with a US home region. Everywhere else the smallest SKU is F2.
-- **Fabric API calls from the CLI need MFA.** For ad hoc reads use `az login --tenant <tenant> --scope https://api.fabric.microsoft.com/.default`.
-- **Azure CLI cannot edit PIM eligibility** (`AADSTS65002`); do that part in the Entra portal.
-- **Fabric tenant settings gate the API, not only roles.** Even with the Fabric Administrator role, the service principal gets `InsufficientScopes` unless `AllowServicePrincipalsUseReadAdminAPIs`, `AllowServicePrincipalsUseWriteAdminAPIs` and `ServicePrincipalAccessGlobalAPIs` are enabled for it. `bootstrap-identity.ps1` enables them for the SPN security group; the tenant settings stack refuses to turn them off.
-- **Graph admin consent and the Fabric Administrator role need a privileged admin.** Run `bootstrap-identity.ps1` while elevated (Global Administrator or Privileged Role Administrator). Otherwise it prints the one command to run later, and the first apply fails when it creates the Entra groups.
-- **Keeping a capacity running.** The pipeline pauses the capacity after every apply. For an event or a demo set `capacity_keep_running = true` in that environment's tfvars through a pull request, and set it back to `false` afterwards (a running capacity is billed). The flag is read by `scripts/capacity.sh`.
-- **Terraform 1.12 or newer.** The azurerm backend only supports Azure DevOps OIDC from 1.12.0.
-- **First plan of a later environment.** Domains are created by the first environment (`create_domains = true`) and looked up by name in the others. Until that environment has applied, the lookup finds nothing and domain assignments are skipped; the next plan picks them up.
-- **Azure DevOps in another tenant than the subscription.** Get the DevOps token through a subscription visible in the organisation's tenant (`-AzdoAuthSubscriptionId` on `bootstrap-identity.ps1`). Do not pass `--tenant` to `az account get-access-token`; it can fall back to a different signed-in account.
-
-## File structure
-
-```
-FabricVending/
-├── terraform.tf                          # required_providers
-├── providers.tf                          # azuread + fabric provider config
-├── backend.tf                            # state backend (configure before use)
-├── variables.tf                          # all input variables
-├── main.tf                               # data sources
-├── locals.tf                             # filtering and naming logic
-├── workspace.tf                          # workspaces, groups, role assignments
-├── domains.tf                            # domain create/lookup
-├── outputs.tf                            # workspace IDs, group IDs, etc.
-├── .gitignore
-├── azure-pipelines.yml                   # workspaces: plan on PR, apply acc then prod on main
-├── azure-pipelines-validate.yml          # offline checks, build policy on main
-├── azure-pipelines-tenant-settings.yml   # tenant settings: own trigger, own approval
-├── .github/                              # GitHub Actions workflows and the shared Terraform action
-├── AGENTS.md                             # guidance for AI assistants
-├── .claude/skills/onboard/               # the /onboard skill
-├── tenant_settings/                      # separate Terraform stack and state for tenant settings
-├── tests/                                # offline terraform tests (mocked providers)
-├── parameters/
-│   ├── environments/
-│   │   ├── dev.tfvars.example            # DEV stage values (copy → dev.tfvars)
-│   │   ├── uat.tfvars.example
-│   │   └── prod.tfvars.example
-│   ├── tenant-settings/
-│   │   └── tenant-settings.tfvars        # governed Fabric tenant settings
-│   └── workspaces/
-│       ├── examples/                     # templates: never read by merge-workspaces.sh, copy don't edit in place
-│       │   ├── example-finance.tfvars
-│       │   ├── example-sales.tfvars
-│       │   └── example-poc-prod-only.tfvars
-│       └── <name>.tfvars                 # one file per logical workspace; these are what the pipeline plans
-└── scripts/
-    ├── bootstrap-backend.ps1              # one-time Azure Storage Account setup for TF state
-    ├── bootstrap-capacity.ps1             # register Microsoft.Fabric, create + pause a capacity (supports F0)
-    ├── check-alignment.ps1                # drift detection: expected vs actual groups/role assignments
-    ├── check-storage-format.sh            # inspect/set dataset storage format for one workspace
-    ├── set-storage-format.sh              # bulk-reconcile storage format from TF state (CI/CD)
-    ├── merge-workspaces.sh                # flatten parameters/workspaces/*.tfvars into one map
-    ├── bootstrap-identity.ps1             # identities, Azure DevOps wiring (-Platform), tenant settings the SPN needs
-    ├── bootstrap-github.ps1               # GitHub Actions wiring: federated credentials, variables, environments
-    ├── capacity.sh                        # resume/suspend a capacity (used by both CI systems)
-    ├── preflight.ps1                      # read-only checks before the first run
-    └── get-fabric-tenant-settings.ps1     # pull tenant-wide Fabric admin settings into tfvars
-```
-
-## Variables reference
-
-| Variable | Required | Default | Description |
+| Tool | Why | macOS | Windows |
 |---|---|---|---|
-| `tenant_id` | yes | — | Azure AD tenant ID |
-| `fabric_capacity_id` | no | `null` | Fabric capacity GUID (not the ARM resource ID) |
-| `fabric_capacity_name` | no | `null` | Capacity display name; Terraform looks up the GUID. Use with `bootstrap-capacity.ps1` |
-| `workspace_environment_suffix` | yes | — | `DEV`, `UAT`, or `PROD` |
-| `workspaces` | yes | — | Map of workspace definitions (see below) |
-| `domains` | no | `[]` | List of domain names to create/look up |
-| `create_domains` | no | `false` | `true` in first stage, `false` thereafter |
-| `group_prefix` | no | `FABRIC_WORKSPACE` | Prefix for AAD group names |
-| `owner_group_display_name` | no | `null` | Existing AAD group to nest into each workspace |
-| `deployment_spn_object_id` | no | `null` | SPN to grant Admin on all workspaces |
-| `git_connection_id` | no | `null` | Fabric Git connection ID (required if using Git integration) |
-| `fabric_spn_client_id` | no | `null` | SPN client ID — required for OIDC or secret auth; omit for Azure CLI |
-| `fabric_spn_client_secret` | no | `null` | SPN client secret — omit to use OIDC (pipeline) or Azure CLI (local) |
+| Azure CLI (`az`) 2.60+ | every script | `brew install azure-cli` | `winget install Microsoft.AzureCLI` |
+| PowerShell 7 (`pwsh`) | the bootstrap scripts | `brew install powershell` | `winget install Microsoft.PowerShell` |
+| Terraform 1.12+ | offline checks only | `brew install hashicorp/tap/terraform` | `winget install Hashicorp.Terraform` |
+| Git | pushing the code | built in | `winget install Git.Git` |
+| GitHub CLI (`gh`) | GitHub path only | `brew install gh` | `winget install GitHub.cli` |
+| `az devops` extension | Azure DevOps path only | `az extension add --name azure-devops` | same |
 
-### Workspace object schema
+On Linux install them from each tool's documentation. In a slim container `pwsh` can stop with "Couldn't find a valid ICU package": install `libicu`, or set `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`.
 
-```hcl
-workspaces = {
-  finance_DEV = {
-    display_name           = "Finance"        # workspace display name (env suffix added automatically)
-    data_domain            = "Finance"        # must match a name in var.domains
-    environment            = "DEV"            # DEV, UAT, or PROD
-    git_integration        = true             # optional, default false
-    git_provider_type      = "AzureDevOps"   # or "GitHub"
-    git_organization_name  = "your-org"
-    git_project_name       = "Your Project"  # AzureDevOps only
-    git_repository_name    = "your-repo"
-    git_branch_name        = "main"           # optional, default "main"
-    git_directory_name     = "/workspaces/Finance"  # optional, default "/"
-    default_storage_format = "Large"          # optional, Large or Small
-    assign_capacity        = true             # optional, default true
-  }
-}
+**Access:**
+
+- An **Azure subscription** in the Fabric tenant, where you can create resource groups and role assignments (Owner, or Contributor + User Access Administrator).
+- For the bootstrap only, an account with **Global Administrator** (or Privileged Role Administrator **and** Fabric Administrator) in that tenant. With PIM, activate the role before you start; activations expire, so re-activate if a script suddenly reports "Insufficient privileges".
+- **Azure DevOps**: an organisation where you can create a project, or **GitHub**: a repository you administer.
+
+You do **not** need an existing capacity or service principal: Terraform creates the capacities and `bootstrap-identity.ps1` creates the identities.
+
+### 1. Pick the right account and tenant
+
+`az` can be signed in to several accounts at once, and the default one is often not the one for the Fabric tenant. Check before anything else:
+
+```bash
+az account list --all --query "[].{name:name, id:id, tenant:tenantId, user:user.name}" -o table
+az login --tenant <fabric-tenant-id>          # if the subscription is not listed under the right account
 ```
 
-## AAD group naming convention
+Every script takes `-SubscriptionId` explicitly and leaves your default subscription alone. If the portal shows a subscription that `az` does not, the portal is using a different account; sign in with that one. A subscription created minutes ago can take a while to appear (`az account clear`, then `az login`, refreshes it).
 
-Groups are named: `<group_prefix>_<WORKSPACE_NAME>_<ENV>_<ROLE>`
+**Which account is the capacity admin?** It must be a native member of the tenant, for example `admin@yourtenant.onmicrosoft.com`. A guest (`name_domain.com#EXT#@...`) is rejected. A tenant created with a personal Microsoft account shows that account as a *member* whose UPN still contains `#EXT#`; Fabric rejects that too. Use a native account as capacity admin and put **every** account you sign in to Fabric with in `workspace_admin_user_object_ids`.
 
-| Environment | Example |
-|---|---|
-| DEV | `FABRIC_WORKSPACE_FINANCE_DEV_ADMIN` |
-| UAT | `FABRIC_WORKSPACE_FINANCE_UAT_CONTRIBUTOR` |
-| PROD | `FABRIC_WORKSPACE_FINANCE_VIEWER` (no suffix) |
+### 2. Run the read-only preflight
 
-Change the prefix using the `group_prefix` variable.
+```powershell
+git clone https://github.com/MrKruge/fabric-vending-machine.git
+cd fabric-vending-machine
+pwsh scripts/preflight.ps1 -SubscriptionId <subscription-id> -Location swedencentral -Sku F2 `
+    -AdminEmail admin@yourtenant.onmicrosoft.com
+```
 
-## Multi-stage deployment
+It changes nothing. It shows which account and tenant it uses, then checks that the subscription is visible, the SKU is offered in the region, the account can read the directory (a guest or an unactivated PIM role cannot), the Power BI service principal is enabled, and every capacity admin is a native member. It tells you the exact UPN to use. `[todo] Microsoft.Fabric not registered` is fine: `bootstrap-identity.ps1` registers it.
 
-The module uses a single state per environment stage. Run `terraform apply` three times — once per stage — with the matching environment tfvars file. Domains are created in DEV (`create_domains = true`) and looked up by name in UAT and PROD.
+### 3. Write your configuration
+
+```bash
+cp parameters/environments/acc.tfvars.example  parameters/environments/acc.tfvars
+cp parameters/environments/prod.tfvars.example parameters/environments/prod.tfvars
+cp parameters/workspaces/examples/example-finance.tfvars parameters/workspaces/finance.tfvars
+```
+
+- In both environment files fill in the tenant id, subscription id, capacity name, SKU, region (the same one you pass as `-Location`), the capacity admin's UPN, and the object ids of the people who should be workspace admins (`az ad user show --id <upn> --query id -o tsv`). Leave `capacity_extra_admins` for now.
+- In the workspace file set the names and the `data_domain`. Every `data_domain` becomes a Fabric domain automatically. Files in `parameters/workspaces/examples/` are templates and never deployed.
+- These files hold ids, never secrets. They are committed, and the pipelines read them.
+
+Check them offline:
+
+```bash
+terraform fmt -recursive && terraform init -backend=false && terraform validate && terraform test
+```
+
+### 4. Create the state storage
+
+```powershell
+pwsh scripts/bootstrap-backend.ps1 -SubscriptionId <subscription-id> -Location swedencentral `
+    -StorageAccountName <globally-unique-name>
+```
+
+Creates `rg-fabricvending-tfstate`, the storage account (Entra ID access only, no shared keys, versioning on) and the `tfstate` container. There is nothing to `terraform init` afterwards: the pipelines configure the backend themselves.
+
+### 5a. Azure DevOps
+
+1. **Create the project and push the code.** Pushing first is safe: Azure DevOps only runs a pipeline after it has been created, and step 2 creates it. After that, bring the tfvars in through a pull request ([step 6](#6-first-deploy)); a push to `main` without them only fails at the first step, nothing is applied.
+
+   ```bash
+   az devops project create --organization https://dev.azure.com/<org> --name "Fabric Vending" --visibility private
+   git remote add azdo "https://dev.azure.com/<org>/Fabric%20Vending/_git/Fabric%20Vending"
+   git push azdo main
+   ```
+
+2. **Identities, service connections, pipelines and policies.** Run it with your admin role active:
+
+   ```powershell
+   pwsh scripts/bootstrap-identity.ps1 -SubscriptionId <subscription-id> -Location swedencentral `
+       -StateResourceGroup rg-fabricvending-tfstate -StorageAccountName <storage-account> `
+       -AzdoOrganization https://dev.azure.com/<org> -AzdoProject "Fabric Vending" `
+       -AzdoAuthSubscriptionId <subscription-in-the-devops-tenant>
+   ```
+
+   `-AzdoAuthSubscriptionId` is only needed when the Azure DevOps organisation is connected to a **different** Entra tenant than the Fabric subscription. It is any subscription your account can see in the **organisation's** tenant (Azure DevOps > Organization settings > Microsoft Entra shows which tenant that is). It is only used to get a DevOps token; nothing is created in it.
+
+   The script creates the managed identity and service principal, their roles and permissions, and per environment (`acc`, `prod`, plus `global` for tenant settings) two service connections, a variable group and a pipeline environment, approval checks on `prod` and `global`, the three pipelines and the build policies on `main`. It ends with what is still missing, if anything, and the service principal's object id.
+
+### 5b. GitHub Actions
+
+1. **Sign in to GitHub with the `workflow` scope** (needed to push `.github/workflows`), create your repository and push. Pushing is safe: the workflows skip until `parameters/environments/acc.tfvars` and `prod.tfvars` exist on `main`.
+
+   ```bash
+   gh auth login -s workflow                    # or: gh auth refresh -s workflow
+   gh repo create <owner>/<repo> --private
+   git remote add github https://github.com/<owner>/<repo>.git
+   git push github main
+   ```
+
+2. **Identities and permissions**, with your admin role active:
+
+   ```powershell
+   pwsh scripts/bootstrap-identity.ps1 -Platform github -SubscriptionId <subscription-id> -Location swedencentral `
+       -StateResourceGroup rg-fabricvending-tfstate -StorageAccountName <storage-account>
+   ```
+
+3. **Wire GitHub**: federated credentials, repository variables and the `acc`, `prod` and `global` environments. Try it with `-DryRun` first.
+
+   ```powershell
+   pwsh scripts/bootstrap-github.ps1 -SubscriptionId <subscription-id> -StateResourceGroup rg-fabricvending-tfstate `
+       -StorageAccountName <storage-account> -Repository <owner>/<repo> -ReviewerLogin <your-github-login>
+   ```
+
+   It reads the environments back and says whether `prod` and `global` really have a reviewer. Required reviewers need a public repository, or GitHub Team/Enterprise for a private one. Without them a merge applies `acc` and then `prod` with nobody approving.
+
+### 6. First deploy
+
+1. Put the service principal object id that `bootstrap-identity.ps1` printed into `capacity_extra_admins` in both environment files, so the pipeline can assign workspaces to the capacities.
+2. Commit the tfvars and workspace files on a branch and open a pull request. `validate` and a plan per environment run on it. Read the plans.
+3. Merge. `deploy` plans and applies `acc`, then plans `prod` and applies it (after approval, where a reviewer is set).
+4. Check the result: both capacities exist and are paused, the workspaces are active with their domain, and your accounts are in the Admin groups.
+
+On Azure DevOps a build you queue by hand does not satisfy a pull request's build policy. After fixing a failed plan, push a commit, or re-queue the policy itself: `az repos pr policy list --id <pr>` to find the evaluation id, then `az repos pr policy queue --id <pr> --evaluation-id <id>`.
+
+## Identities and permissions
+
+| Identity | Used for | Gets |
+|---|---|---|
+| User-assigned **managed identity** `id-fabricvending-pipeline` | State storage, capacity create/pause/resume | Storage Blob Data Contributor on the state account, Contributor on `rg-fabricvending-capacity` |
+| **Service principal** `sp-fabricvending-fabric` (app registration) | Fabric and Microsoft Graph APIs: workspaces, role assignments, groups, domains | Graph application permissions `Group.ReadWrite.All` and `Directory.ReadWrite.All`, the Entra role **Fabric Administrator**, Reader on `rg-fabricvending-capacity`, and the three Fabric tenant settings below for its group `grp-fabricvending-spns` |
+
+The Fabric and Graph APIs cannot be called with a managed identity from a pipeline, hence the second identity. Together these rights are close to tenant administration for anyone who can get a change applied from `main`. Protect `main` with required reviews, keep reviewers on the `prod` and `global` environments, and limit who can edit the pipelines.
+
+The tenant settings the service principal needs: `AllowServicePrincipalsUseReadAdminAPIs`, `AllowServicePrincipalsUseWriteAdminAPIs` and `ServicePrincipalAccessGlobalAPIs`. `bootstrap-identity.ps1` enables them for `grp-fabricvending-spns`; the tenant settings stack refuses to turn them off.
+
+## Troubleshooting
+
+`scripts/preflight.ps1` checks the first group before you start. The rest are things real first runs ran into.
+
+**Before you start**
+
+- **Wrong tenant or account.** `az` used another signed-in account. See [step 1](#1-pick-the-right-account-and-tenant).
+- **"Insufficient privileges" from Graph.** The account is a guest in the tenant, or its admin role is not activated in PIM. Activate it, or use a native admin account, and re-run. All scripts are safe to re-run.
+- **Power BI Service disabled** (`AADSTS500014 ... is disabled`). A Global Administrator enables it: Entra > Enterprise applications > Power BI Service > Properties > "Enabled for users to sign-in" = Yes. In a tenant that never used Fabric, sign in once to app.fabric.microsoft.com so it exists.
+- **Capacity admin rejected** (`Invalid principal name`, or `All provided principals must be existing, user or service principals`): a guest or `#EXT#` account. Use a native member's UPN; some accounts have no `mail`, so use the UPN, not the email address.
+- **Capacity region.** The region must suit the tenant's home geography, and a busy region can be full. `Location needs to match the PowerBI cluster location` means the region is wrong for the tenant. List what is offered: `az rest --method get --url "https://management.azure.com/subscriptions/<sub>/providers/Microsoft.Fabric/skus?api-version=2023-11-01"`.
+
+**During the bootstrap**
+
+- **Graph permissions not granted.** The script grants them and reads them back. If it says they are missing, activate Global Administrator or Privileged Role Administrator and re-run it.
+- **Tenant settings refer to a deleted group** (an earlier onboarding was cleaned up). Fabric rejects any update that still names it; the script now drops deleted groups and says so.
+- **`AADSTS700213: No matching federated identity record`** in the first plan. A federated credential from an earlier onboarding (another project or repository) had the same name and a different subject. The scripts now compare the subject and replace such a credential; re-run `bootstrap-identity.ps1` (Azure DevOps) or `bootstrap-github.ps1`.
+- **Azure DevOps in another tenant than the subscription.** Pass `-AzdoAuthSubscriptionId` ([step 5a](#5a-azure-devops)). Do not pass `--tenant` to `az account get-access-token` yourself; it can fall back to a different signed-in account.
+- **Azure CLI cannot edit PIM eligibility** (`AADSTS65002`); do that in the Entra portal.
+
+**In the pipeline**
+
+- **Terraform 1.12 or newer.** The azurerm backend supports Azure DevOps OIDC from 1.12.0.
+- **A paused capacity breaks the plan.** The pipeline resumes it first and pauses it afterwards. Capacity transitions can take minutes; don't resume while it is pausing.
+- **Keeping a capacity running** for a demo: set `capacity_keep_running = true` in that environment's tfvars through a pull request, and back to `false` afterwards (a running capacity is billed). `scripts/capacity.sh` reads it.
+- **"Instance cannot be destroyed" for `fabric_domain.this[...]`.** Domains are protected from deletion. When no workspace uses a domain any more (removed, or `data_domain` renamed), keep its name in `domains` in `acc.tfvars` and the domain stays. To really delete one, do it in a pull request that drops the name and also takes `prevent_destroy` out of `domains.tf` for that one change; put it back afterwards.
+- **Domain not assigned in a pull request plan for prod.** On a pull request both environments are planned side by side, so prod cannot find a domain that acc has not created yet and leaves the assignment out of that plan. After merging, prod is planned after acc applied and gets it.
+- **Fabric API calls from the CLI need MFA.** For ad hoc reads: `az login --tenant <tenant> --scope https://api.fabric.microsoft.com/.default`.
+
+## Adding a DEV environment
+
+The pipelines deploy `acc` and `prod`. To also deploy the `*_DEV` workspace entries, which is where Git integration usually lives:
+
+1. `cp parameters/environments/dev.tfvars.example parameters/environments/dev.tfvars` and fill it in. Leave `create_domains = true` in `acc.tfvars` and `false` in `dev.tfvars`: acc's state owns the domains, and moving them would make acc's plan want to delete them. The first time a new domain appears, dev deploys before acc has created it and assigns it on the next run. Set `git_connection_id` if a workspace uses Git integration.
+2. Re-run the bootstrap with `-Environments dev,acc,prod` (`bootstrap-identity.ps1`, and `bootstrap-github.ps1` on GitHub).
+3. Azure DevOps: in `azure-pipelines.yml` add a `dev` stage template before `acc`, and give `acc` `planAfter: Apply_dev` and `applyDependsOn: [Apply_dev]`. GitHub: in `.github/workflows/deploy.yml` add `dev` to the pull request matrix and the readiness check, and add `plan-dev` and `apply-dev` jobs before `plan-acc`, which then `needs: apply-dev`.
 
 ## Tenant settings
 
-Fabric tenant settings are tenant-wide, so they live in their own Terraform stack (`tenant_settings/`), their own state and their own pipeline (`azure-pipelines-tenant-settings.yml`). The pipeline runs only when `parameters/tenant-settings/` or the stack changes, so editing a setting does not plan the workspaces and the other way round. A pull request gets a plan; a push to `main` plans, then waits for approval on the `fabricvending-global` environment before it applies. That environment, its service connections and its variable group form a tenant-wide `global` scope, independent of acc and prod.
+Fabric tenant settings are tenant-wide, so they live in their own Terraform stack (`tenant_settings/`), their own state and their own pipeline. It runs only when `parameters/tenant-settings/` or the stack changes, and does nothing until `parameters/tenant-settings/tenant-settings.tfvars` exists. A pull request gets a plan; a push to `main` plans, then waits for approval on the `global` environment before it applies.
 
 Start from the live tenant and keep only what you want governed:
 
@@ -351,44 +258,149 @@ az login --tenant <tenant-id>
 pwsh scripts/get-fabric-tenant-settings.ps1 -TenantId <tenant-id> -UseAzCli -OutputTfvars
 ```
 
-That writes every setting as a `fabric_tenant_settings` map. Copy the entries you want into `parameters/tenant-settings/tenant-settings.tfvars`. Settings that are not listed are left alone, and removing an entry stops managing it without resetting it. `delegated_to` lists Entra group display names; empty means the whole tenant.
+That writes every setting as a `fabric_tenant_settings` map. Copy the entries you want into `parameters/tenant-settings/tenant-settings.tfvars` (start from the `.example` next to it). Settings that are not listed are left alone, and removing an entry stops managing it without resetting it. `delegated_to` lists Entra group display names; empty means the whole tenant. The three settings the pipeline's own service principal depends on cannot be disabled here: the plan refuses it.
 
-The three settings the pipeline's own service principal depends on cannot be disabled here: the plan refuses it.
+## F0 capacities
+
+The `azurerm` provider only creates F2 and up. F0 is offered in very few regions (West Central US and two canary regions), so it needs a tenant with a US home region. Create it with the script, then let Terraform look it up:
+
+```powershell
+pwsh scripts/bootstrap-capacity.ps1 -SubscriptionId <subscription-id> -CapacityName <name> -Sku F0 `
+    -Location westcentralus -AdminEmail admin@yourtenant.onmicrosoft.com,<pipeline-spn-object-id>
+```
+
+Then set `create_capacity = true`, `capacity_sku = "F0"` and `capacity_name = "<name>"` in the environment's tfvars. Terraform does not manage this capacity's admins, so include the pipeline service principal's object id in `-AdminEmail` (re-run the script after `bootstrap-identity.ps1`).
+
+## Starting over in the same tenant
+
+Re-running the bootstrap scripts is safe, also after an earlier onboarding: they reuse what exists and repair stale federated credentials and deleted groups in tenant settings. To remove an onboarding completely, delete what it created: the resource groups `rg-fabricvending-capacity` and `rg-fabricvending-tfstate`, the app registration `sp-fabricvending-fabric`, the group `grp-fabricvending-spns`, the workspaces and their `FABRIC_WORKSPACE_*` groups, and the domains (Terraform protects domains from deletion on purpose). Then the service connections, variable groups and pipelines in Azure DevOps, or the variables and environments in GitHub.
+
+## Local development
+
+Only offline commands run locally:
+
+```bash
+terraform fmt -recursive && terraform init -backend=false && terraform validate && terraform test
+(cd tenant_settings && terraform init -backend=false && terraform validate && terraform test)
+for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done && bash tests/capacity-script.sh && bash tests/merge-workspaces.sh
+```
+
+`terraform plan` and `apply` run only in the pipelines, with the pipeline identities.
 
 ## Drift detection
 
-Use `scripts/check-alignment.ps1` to verify that expected workspaces and AAD groups exist in your tenant and that role assignments are correct:
+`scripts/check-alignment.ps1` checks that the expected workspaces and Entra groups exist and that the role assignments follow the naming convention, so a role assignment added by hand in the Fabric portal shows up immediately:
 
 ```powershell
 Connect-AzAccount
-.\scripts\check-alignment.ps1 -GroupPrefix "FABRIC_WORKSPACE" -WorkspaceNames @("Finance","Sales")
+pwsh scripts/check-alignment.ps1 -GroupPrefix "FABRIC_WORKSPACE" -WorkspaceNames @("Finance","Sales")
 ```
-
-This is the tool's answer to ClickOps drift: anyone can add a role assignment by hand in the
-Fabric portal, but `check-alignment.ps1` flags it immediately — it diffs *actual* role
-assignments against the naming convention this module enforces, not just whether the
-Terraform-managed resources exist.
 
 ## Other scripts
 
 | Script | Why | Usage |
 |---|---|---|
-| `scripts/check-storage-format.sh` | The Fabric/Terraform provider doesn't manage per-dataset storage format (Large/Small) — it's a Power BI REST API setting. Use this to inspect or fix one workspace at a time, e.g. from Cloud Shell with no SPN needed. | `bash scripts/check-storage-format.sh <workspace_id> [--set-large\|--set-small]` |
-| `scripts/set-storage-format.sh` | Bulk version of the above — reads `workspace_storage_formats` straight from Terraform state/plan and reconciles every vended workspace (and optionally every dataset in them) to its configured `default_storage_format`. Built for CI/CD, run right after `terraform apply`. | `bash scripts/set-storage-format.sh <tf_working_dir> [--dry-run] [--datasets]` |
-| `scripts/merge-workspaces.sh` | `-var-file` flags get unwieldy once you have more than a handful of workspace tfvars files. This flattens every file in `parameters/workspaces/` into one `workspaces = { ... }` map so `terraform plan`/`apply` only needs one `-var-file`. | `bash scripts/merge-workspaces.sh parameters/workspaces > merged_workspaces.auto.tfvars` |
-| `scripts/get-fabric-tenant-settings.ps1` | Fabric tenant-wide admin settings (e.g. `PublishToWeb`, external sharing) are tenant-wide ClickOps targets — one person can flip a tenant setting from the portal with no review. This pulls current settings into a ready-to-paste tfvars block, and `-CheckPublishToWeb` audits which reports are currently publicly exposed before you lock that setting down. | `./scripts/get-fabric-tenant-settings.ps1 -TenantId <tenant-id> [-UseAzCli] [-OutputTfvars] [-CheckPublishToWeb]` |
+| `scripts/check-storage-format.sh` | The Fabric provider does not manage per-dataset storage format (Large/Small); it is a Power BI REST setting. Inspect or fix one workspace. | `bash scripts/check-storage-format.sh <workspace_id> [--set-large\|--set-small]` |
+| `scripts/set-storage-format.sh` | Bulk version: reads `workspace_storage_formats` from Terraform and reconciles every vended workspace to its `default_storage_format`. For a pipeline step after the apply. | `bash scripts/set-storage-format.sh <tf_working_dir> [--dry-run] [--datasets]` |
+| `scripts/merge-workspaces.sh` | Merges every `parameters/workspaces/*.tfvars` (not `examples/`) into one `workspaces` map. The pipelines run it. | `bash scripts/merge-workspaces.sh parameters/workspaces > merged_workspaces.auto.tfvars` |
+| `scripts/get-fabric-tenant-settings.ps1` | Exports the live tenant settings as tfvars, and with `-CheckPublishToWeb` lists reports that are publicly exposed. | `pwsh scripts/get-fabric-tenant-settings.ps1 -TenantId <tenant-id> [-UseAzCli] [-OutputTfvars] [-CheckPublishToWeb]` |
+
+## File structure
+
+```
+├── terraform.tf, providers.tf            # providers and their identities
+├── backend.tf                            # explains where the backend comes from (the pipelines)
+├── variables.tf, locals.tf, main.tf
+├── capacity.tf                           # the environment's capacity
+├── workspace.tf                          # workspaces, groups, role assignments, Git integration
+├── domains.tf                            # domains: created by the first environment, looked up by the others
+├── outputs.tf
+├── azure-pipelines.yml                   # Azure DevOps: deploy
+├── azure-pipelines-validate.yml          # Azure DevOps: offline checks (build policy)
+├── azure-pipelines-tenant-settings.yml   # Azure DevOps: tenant settings
+├── .azuredevops/                         # Azure DevOps stage and step templates
+├── .github/                              # GitHub Actions workflows and the shared Terraform action
+├── tenant_settings/                      # separate stack and state for tenant settings
+├── tests/                                # offline tests (mocked providers, fake az)
+├── parameters/
+│   ├── environments/                     # acc / prod (/ dev) .tfvars.example → copy to .tfvars
+│   ├── tenant-settings/                  # tenant-settings.tfvars.example → copy to .tfvars
+│   └── workspaces/
+│       ├── examples/                     # templates, never deployed
+│       └── <name>.tfvars                 # one file per logical workspace
+├── scripts/
+│   ├── preflight.ps1                     # read-only first-run checks
+│   ├── bootstrap-backend.ps1             # state storage
+│   ├── bootstrap-identity.ps1            # identities, permissions, Azure DevOps wiring
+│   ├── bootstrap-github.ps1              # GitHub Actions wiring
+│   ├── bootstrap-capacity.ps1            # F0 capacities only
+│   ├── capacity.sh                       # resume/suspend, used by both CI systems
+│   ├── merge-workspaces.sh               # merge workspace files for the plan
+│   ├── get-fabric-tenant-settings.ps1    # export tenant settings
+│   ├── check-alignment.ps1               # drift detection
+│   └── check-storage-format.sh, set-storage-format.sh, install-terraform.sh, tfvar.sh
+├── AGENTS.md                             # guidance for AI assistants
+└── .claude/skills/onboard/               # the /onboard skill
+```
+
+## Variables reference
+
+| Variable | Default | Description |
+|---|---|---|
+| `tenant_id` | required | Entra tenant id |
+| `workspace_environment_suffix` | required | `DEV`, `UAT` or `PROD`: which workspace entries this environment deploys |
+| `workspaces` | required | Map of workspace definitions (merged from `parameters/workspaces/*.tfvars`, see below) |
+| `create_capacity` | `false` | `true` to have Terraform create the environment's capacity |
+| `capacity_name` | `null` | Capacity name (3-63 lowercase letters/digits). Required with `create_capacity` |
+| `capacity_sku` | `"F2"` | F2 and up are created by Terraform; F0 by `bootstrap-capacity.ps1` |
+| `capacity_resource_group` | `null` | Resource group for the capacity (`bootstrap-identity.ps1` creates `rg-fabricvending-capacity`) |
+| `capacity_location` | `"West Europe"` | Region of the capacity |
+| `capacity_admin_email` | `null` | UPN of a native member who administers the capacity |
+| `capacity_extra_admins` | `[]` | More capacity admins: the pipeline service principal's object id goes here |
+| `capacity_subscription_id` | `null` | Subscription of the capacity resource group |
+| `capacity_keep_running` | `false` | Read by `capacity.sh`: leave the capacity running after an apply |
+| `fabric_capacity_id` / `fabric_capacity_name` | `null` | Use an existing capacity instead of creating one |
+| `create_domains` | `false` | `true` in the first environment the pipeline deploys (acc), `false` in the others |
+| `domains` | `[]` | Extra domains no workspace uses yet; every workspace `data_domain` is included automatically |
+| `workspace_admin_user_object_ids` | `[]` | Users added to every workspace's Admin group |
+| `group_prefix` | `"FABRIC_WORKSPACE"` | Prefix of the Entra group names |
+| `owner_group_display_name` | `null` | Existing Entra group nested into each Admin group |
+| `deployment_spn_object_id` | `null` | Service principal made admin of every workspace |
+| `git_connection_id` | `null` | Fabric Git connection id, needed for Git integration |
+| `fabric_spn_client_id`, `azure_client_id`, `*_service_connection_id` | `null` | Set by the pipelines, never in tfvars |
+
+### Workspace definition
+
+```hcl
+workspaces = {
+  finance_UAT = {
+    display_name           = "Finance"       # the stage suffix is added (Finance UAT); PROD has none
+    data_domain            = "Finance"       # Fabric domain, created automatically; "" for none
+    environment            = "UAT"           # DEV, UAT or PROD
+    git_integration        = false           # optional, usually only on DEV
+    git_provider_type      = "AzureDevOps"   # or "GitHub"
+    git_organization_name  = "your-org"
+    git_project_name       = "Your Project"  # Azure DevOps only
+    git_repository_name    = "your-repo"
+    git_branch_name        = "main"          # optional
+    git_directory_name     = "/workspaces/Finance" # optional
+    default_storage_format = "Large"         # optional, Large or Small
+    assign_capacity        = true            # optional; false for a Pro workspace
+  }
+}
+```
+
+Group names are `<group_prefix>_<WORKSPACE_NAME>_<ENV>_<ROLE>`, for example `FABRIC_WORKSPACE_FINANCE_UAT_CONTRIBUTOR`. PROD has no environment part: `FABRIC_WORKSPACE_FINANCE_VIEWER`.
 
 ## Outputs
 
 | Output | Description |
 |---|---|
-| `workspace_ids` | Map of workspace key → Fabric workspace ID |
-| `domain_ids` | Map of domain name → Fabric domain ID |
-| `aad_group_object_ids` | Map of workspace_role key → AAD group object ID |
-| `workspace_storage_formats` | Map of workspace ID → storage format (for post-apply config) |
+| `workspace_ids` | Workspace key → Fabric workspace id |
+| `domain_ids` | Domain name → Fabric domain id |
+| `aad_group_object_ids` | Workspace role key → Entra group object id |
+| `workspace_storage_formats` | Workspace id → storage format (for `set-storage-format.sh`) |
 
 ## License
 
 MIT
-
-> **OPEN-SOURCE COPY.** Environment files are examples. Copy `parameters/environments/*.tfvars.example` to `*.tfvars` and `parameters/tenant-settings/tenant-settings.tfvars.example` to `tenant-settings.tfvars`, then fill them in. The pipelines read those files, so commit them to your own repository (they hold ids, never secrets).

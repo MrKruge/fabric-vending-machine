@@ -1,20 +1,29 @@
-# ── Environment: DEV ──────────────────────────────────────────────────────────
-# Copy to parameters/environments/dev.tfvars and fill in your values.
+# ── Environment: DEV (optional) ──────────────────────────────────────────────────
+# The pipelines deploy acc and prod. Use this only after adding a dev environment to them
+# (README: "Adding a DEV environment"). DEV is where Git integration is usually switched on.
+# Ids only, never secrets: this file is committed and read by the pipeline.
 
-tenant_id                    = "00000000-0000-0000-0000-000000000000"  # Your Azure AD tenant ID
+tenant_id                    = "00000000-0000-0000-0000-000000000000" # your Entra tenant id
 workspace_environment_suffix = "DEV"
-fabric_capacity_id           = "00000000-0000-0000-0000-000000000000"  # Existing Fabric capacity GUID (or omit and set create_capacity = true)
-create_domains               = true   # Create domains in DEV; set false in UAT/PROD
+create_domains               = false # acc keeps creating the domains (its state owns them); dev looks them up
 
-# Optional: SPN to grant Admin on all workspaces (e.g. a CI/CD pipeline identity)
-# deployment_spn_object_id = "00000000-0000-0000-0000-000000000000"
+# Capacity (created by Terraform, paused by the pipeline after each apply)
+create_capacity          = true
+capacity_name            = "mycompanyfabricdev" # 3-63 lowercase letters/digits, unique per region
+capacity_sku             = "F2"
+capacity_resource_group  = "rg-fabricvending-capacity"
+capacity_location        = "westeurope"
+capacity_admin_email     = "admin@yourtenant.onmicrosoft.com" # UPN of a native member; no guests, no #EXT#
+capacity_subscription_id = "00000000-0000-0000-0000-000000000000"
+capacity_extra_admins    = ["00000000-0000-0000-0000-000000000000"] # pipeline service principal object id
 
-# Optional: existing AAD group to nest into each workspace Admin group (DEV/UAT) or Member group (PROD)
-# owner_group_display_name = "Fabric Admins"
+workspace_admin_user_object_ids = [
+  "00000000-0000-0000-0000-000000000000",
+]
 
-# Optional: Fabric configured Git connection ID (required if any workspace has git_integration = true)
+# Needed when a workspace has git_integration = true: the id of a Fabric Git connection
+# (Fabric > Settings > Manage connections and gateways).
 # git_connection_id = "00000000-0000-0000-0000-000000000000"
 
-# Sensitive: pass as TF_VAR_* env vars or via a secrets manager — never commit these
-# fabric_spn_client_id     = "..."
-# fabric_spn_client_secret = "..."
+# Optional: an existing Entra group nested into each workspace Admin group
+# owner_group_display_name = "Fabric Admins"

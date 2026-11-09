@@ -97,7 +97,8 @@ variable "workspaces" {
 
     Fields:
     - display_name:          Human-readable workspace name (environment suffix appended automatically).
-    - data_domain:           Domain name this workspace belongs to. Must match a value in `domains`.
+    - data_domain:           Fabric domain this workspace belongs to. The domain is created (first
+                             environment) or looked up (later ones) automatically; "" for none.
     - environment:           DEV, UAT, or PROD.
     - git_integration:       Enable Git integration (typically DEV only).
     - git_provider_type:     AzureDevOps or GitHub (default: AzureDevOps).
@@ -113,14 +114,14 @@ variable "workspaces" {
 
 variable "domains" {
   type        = list(string)
-  description = "List of Fabric data domain names to create (when create_domains = true) or look up (when false). Domains are tenant-wide."
+  description = "Extra Fabric domain names to create (create_domains = true) or look up (false). Every workspace data_domain is included automatically, so this is for domains no workspace uses (yet, or any more: domains are protected from deletion, so keep a domain here when its last workspace goes). Domains are tenant-wide."
   default     = []
 }
 
 variable "create_domains" {
   type        = bool
   default     = false
-  description = "Set to true in the first/DEV stage to create Fabric domains. Domains are tenant-wide — subsequent stages should set this to false and look up existing domains."
+  description = "true in the first environment the pipeline deploys (acc by default) so it creates the Fabric domains; false in every later one, which looks them up by name. Domains are tenant-wide."
 }
 
 variable "workspace_environment_suffix" {

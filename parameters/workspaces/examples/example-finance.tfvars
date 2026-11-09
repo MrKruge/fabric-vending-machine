@@ -1,6 +1,8 @@
 # ── Workspace parameter file example ─────────────────────────────────────────
-# One file per logical workspace. Each file defines DEV, UAT, and PROD entries.
-# Merge all workspace files together when running terraform plan/apply.
+# Copy to parameters/workspaces/<name>.tfvars (files in examples/ are never deployed).
+# One file per logical workspace. The pipelines deploy the UAT (acc) and PROD (prod)
+# entries; the DEV entry is only deployed once you add a dev environment
+# (README: "Adding a DEV environment").
 #
 # Key convention: <short_name>_<ENV>
 # All three environments share the same display_name — the stage suffix is

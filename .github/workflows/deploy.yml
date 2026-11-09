@@ -1,27 +1,56 @@
-# Workspaces, role groups and capacities. A pull request gets a plan per environment; a push to
-# main plans and applies acc, then prod. Prod waits for a reviewer on the `prod` GitHub environment
-# (required reviewers need GitHub Team/Enterprise for a private repository, or a public repository).
-# Values come from repository variables written by scripts/bootstrap-identity.ps1 -Platform github.
+# Workspaces, role groups and capacities.
+#   Pull request: a plan per environment, nothing is applied.
+#   Push to main: plan acc, apply acc, then plan prod and apply prod. Prod is planned only after acc
+#   has applied, so it sees what acc created (for example a new Fabric domain). Prod waits for a
+#   reviewer on the `prod` GitHub environment when one is configured (required reviewers need a
+#   public repository, or GitHub Team/Enterprise for a private one; without them prod applies
+#   right after acc).
+# Nothing runs until parameters/environments/acc.tfvars and prod.tfvars exist, so pushing the
+# repository as cloned is safe. Values come from repository variables written by
+# scripts/bootstrap-github.ps1.
 name: deploy
 
 on:
   push:
     branches: [main]
-    paths-ignore: ["tenant_settings/**", "parameters/tenant-settings/**", "README.md", "assets/**"]
+    paths-ignore: ["tenant_settings/**", "parameters/tenant-settings/**", "**.md", "assets/**"]
   pull_request:
-    paths-ignore: ["tenant_settings/**", "parameters/tenant-settings/**", "README.md", "assets/**"]
+    paths-ignore: ["tenant_settings/**", "parameters/tenant-settings/**", "**.md", "assets/**"]
 
 permissions:
   id-token: write
   contents: read
 
-# One workspaces deploy at a time: an older pending run is replaced by the newest, a running one finishes.
+# Pushes to main queue behind each other (a pending one is replaced by the newest, which deploys the
+# same main). Pull request plans have their own group per branch, so they never cancel a pending deploy.
 concurrency:
-  group: fabric-vending-deploy
+  group: fabric-vending-deploy-${{ github.event_name == 'push' && 'main' || github.ref }}
   cancel-in-progress: false
 
 jobs:
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        shell: bash
+        run: |
+          missing=""
+          for env in acc prod; do
+            [ -f "parameters/environments/${env}.tfvars" ] || missing="$missing parameters/environments/${env}.tfvars"
+          done
+          if [ -n "$missing" ]; then
+            echo "::notice title=Nothing to deploy yet::Missing:${missing}. Copy the .tfvars.example files, fill them in and open a pull request (see README, Getting started)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
   plan:
+    if: github.event_name == 'pull_request' && needs.config.outputs.ready == 'true'
+    needs: config
     strategy:
       matrix:
         environment: [acc, prod]
@@ -40,16 +69,33 @@ jobs:
           tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
           tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
           tfstate-container: ${{ vars.TFSTATE_CONTAINER }}
-      - uses: actions/upload-artifact@v4
-        if: github.event_name == 'push'
+
+  plan-acc:
+    if: github.event_name == 'push' && needs.config.outputs.ready == 'true'
+    needs: config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/terraform
         with:
-          name: tfplan-${{ matrix.environment }}
+          stack: workspaces
+          environment: acc
+          command: plan
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          fabric-client-id: ${{ vars.FABRIC_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          tfstate-container: ${{ vars.TFSTATE_CONTAINER }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-acc
           path: tfplan
           include-hidden-files: true
 
   apply-acc:
-    if: github.event_name == 'push'
-    needs: plan
+    needs: plan-acc
     runs-on: ubuntu-latest
     environment: acc
     steps:
@@ -70,9 +116,32 @@ jobs:
           tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
           tfstate-container: ${{ vars.TFSTATE_CONTAINER }}
 
-  apply-prod:
-    if: github.event_name == 'push'
+  # Planned after acc has applied, so domains and other tenant-wide objects acc created are found.
+  plan-prod:
     needs: apply-acc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/terraform
+        with:
+          stack: workspaces
+          environment: prod
+          command: plan
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          fabric-client-id: ${{ vars.FABRIC_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          tfstate-resource-group: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          tfstate-storage-account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          tfstate-container: ${{ vars.TFSTATE_CONTAINER }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-prod
+          path: tfplan
+          include-hidden-files: true
+
+  apply-prod:
+    needs: plan-prod
     runs-on: ubuntu-latest
     environment: prod
     steps:

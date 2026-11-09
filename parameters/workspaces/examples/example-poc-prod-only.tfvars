@@ -1,17 +1,13 @@
-# ── Workspace parameter file example: POC → PROD, no DEV/UAT stage ──────────
-# Use this pattern when a workspace starts as a one-off POC and ships straight
-# to production with no separate DEV/UAT environments — common for small
-# analytics teams or a single proof-of-concept that "becomes" prod.
-#
-# Only a single entry is defined (environment = "PROD"). Apply this with
-# parameters/environments/prod.tfvars — there is nothing to apply in DEV/UAT
-# stages for this workspace, and the module does not require every workspace
-# to have all three stages defined.
+# ── Workspace template: POC → PROD, no DEV/UAT stage ─────────────────────────
+# Copy to parameters/workspaces/<name>.tfvars (files in examples/ are never deployed).
+# Use this when a workspace starts as a one-off POC and goes straight to production.
+# Only a PROD entry is defined, so only the prod environment creates it; acc has
+# nothing to do for it. Not every workspace needs every stage.
 
 workspaces = {
   poc_report_PROD = {
     display_name    = "POC Report"
-    data_domain     = "Finance" # must already exist or be created by another workspace's DEV stage
+    data_domain     = "Finance" # created by the first environment (acc) like every other data_domain
     environment     = "PROD"
     git_integration = false # typically skipped for POC-turned-prod workspaces
   }
