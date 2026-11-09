@@ -91,7 +91,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: tfplan-acc
-          path: tfplan
+          path: workspace_vending/tfplan
           include-hidden-files: true
 
   apply-acc:
@@ -103,6 +103,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: tfplan-acc
+          path: workspace_vending
       - uses: ./.github/actions/terraform
         with:
           stack: workspaces
@@ -137,7 +138,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: tfplan-prod
-          path: tfplan
+          path: workspace_vending/tfplan
           include-hidden-files: true
 
   apply-prod:
@@ -149,6 +150,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: tfplan-prod
+          path: workspace_vending
       - uses: ./.github/actions/terraform
         with:
           stack: workspaces

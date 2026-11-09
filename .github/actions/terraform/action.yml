@@ -69,9 +69,10 @@ runs:
       run: |
         set -euo pipefail
         if [ "$STACK" = "workspaces" ]; then
-          dir=.; key="fabric-vending-${ENVIRONMENT}.tfstate"
-          bash scripts/merge-workspaces.sh parameters/workspaces > merged_workspaces.auto.tfvars
-          varfile="parameters/environments/${ENVIRONMENT}.tfvars"
+          dir=workspace_vending; key="fabric-vending-${ENVIRONMENT}.tfstate"
+          # *.auto.tfvars is only read from the working directory, so it goes next to the stack.
+          bash scripts/merge-workspaces.sh parameters/workspaces > "$dir/merged_workspaces.auto.tfvars"
+          varfile="../parameters/environments/${ENVIRONMENT}.tfvars"
         else
           dir=tenant_settings; key="fabric-vending-tenant-settings.tfstate"
           varfile="../parameters/tenant-settings/tenant-settings.tfvars"

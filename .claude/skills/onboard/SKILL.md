@@ -12,7 +12,7 @@ The README's "Getting started" is the same procedure for a human; keep the two i
 ## Ground rules
 
 - **Terraform never runs from this machine.** Only the pipelines plan and apply. Offline
-  `terraform fmt`, `init -backend=false`, `validate` and `test` are fine. Never run `terraform plan`,
+  `terraform fmt`, and `init -backend=false`, `validate` and `test` in `workspace_vending/` are fine. Never run `terraform plan`,
   `apply` or `destroy`, and never `terraform init` against the real backend.
 - **Everything is code.** If something is missing, it is fixed in a script, Terraform or a pipeline and
   re-run, not clicked in a portal. The only human-only step is activating an admin role.
@@ -93,7 +93,7 @@ mail address (some accounts have none).
   `workspace_admin_user_object_ids` in both files.
 - Leave `capacity_extra_admins` until bootstrap-identity has printed the service principal object id.
 - Add the workspace files from question 8.
-- Run and show: `terraform fmt -recursive && terraform init -backend=false && terraform validate && terraform test`.
+- Run and show: `terraform fmt -recursive && (cd workspace_vending && terraform init -backend=false && terraform validate && terraform test)`.
 
 ## 5. Bootstrap (live changes: confirm each one by name)
 

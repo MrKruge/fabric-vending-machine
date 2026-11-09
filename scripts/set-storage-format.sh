@@ -17,7 +17,7 @@
 # Use --datasets to also report/update dataset-level formats.
 #
 # Usage:
-#   set-storage-format.sh <working_directory> [--dry-run] [--datasets]
+#   set-storage-format.sh <working_directory> [--dry-run] [--datasets]   (working_directory: workspace_vending)
 #
 # Required env vars:
 #   TF_VAR_fabric_spn_client_id

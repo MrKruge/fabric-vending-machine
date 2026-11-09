@@ -128,7 +128,7 @@ cp parameters/workspaces/examples/example-finance.tfvars parameters/workspaces/f
 Check them offline:
 
 ```bash
-terraform fmt -recursive && terraform init -backend=false && terraform validate && terraform test
+terraform fmt -recursive && (cd workspace_vending && terraform init -backend=false && terraform validate && terraform test)
 ```
 
 ### 4. Create the state storage
@@ -235,7 +235,7 @@ The tenant settings the service principal needs: `AllowServicePrincipalsUseReadA
 - **Terraform 1.12 or newer.** The azurerm backend supports Azure DevOps OIDC from 1.12.0.
 - **A paused capacity breaks the plan.** The pipeline resumes it first and pauses it afterwards. Capacity transitions can take minutes; don't resume while it is pausing.
 - **Keeping a capacity running** for a demo: set `capacity_keep_running = true` in that environment's tfvars through a pull request, and back to `false` afterwards (a running capacity is billed). `scripts/capacity.sh` reads it.
-- **"Instance cannot be destroyed" for `fabric_domain.this[...]`.** Domains are protected from deletion. When no workspace uses a domain any more (removed, or `data_domain` renamed), keep its name in `domains` in `acc.tfvars` and the domain stays. To really delete one, do it in a pull request that drops the name and also takes `prevent_destroy` out of `domains.tf` for that one change; put it back afterwards.
+- **"Instance cannot be destroyed" for `fabric_domain.this[...]`.** Domains are protected from deletion. When no workspace uses a domain any more (removed, or `data_domain` renamed), keep its name in `domains` in `acc.tfvars` and the domain stays. To really delete one, do it in a pull request that drops the name and also takes `prevent_destroy` out of `workspace_vending/domains.tf` for that one change; put it back afterwards.
 - **Domain not assigned in a pull request plan for prod.** On a pull request both environments are planned side by side, so prod cannot find a domain that acc has not created yet and leaves the assignment out of that plan. After merging, prod is planned after acc applied and gets it.
 - **Fabric API calls from the CLI need MFA.** For ad hoc reads: `az login --tenant <tenant> --scope https://api.fabric.microsoft.com/.default`.
 
@@ -249,7 +249,7 @@ The pipelines deploy `acc` and `prod`. To also deploy the `*_DEV` workspace entr
 
 ## Tenant settings
 
-Fabric tenant settings are tenant-wide, so they live in their own Terraform stack (`tenant_settings/`), their own state and their own pipeline. It runs only when `parameters/tenant-settings/` or the stack changes, and does nothing until `parameters/tenant-settings/tenant-settings.tfvars` exists. A pull request gets a plan; a push to `main` plans, then waits for approval on the `global` environment before it applies.
+Fabric tenant settings are tenant-wide, so they live in their own Terraform stack (`tenant_settings/`, next to `workspace_vending/`), their own state and their own pipeline. It runs only when `parameters/tenant-settings/` or the stack changes, and does nothing until `parameters/tenant-settings/tenant-settings.tfvars` exists. A pull request gets a plan; a push to `main` plans, then waits for approval on the `global` environment before it applies.
 
 Start from the live tenant and keep only what you want governed:
 
@@ -280,7 +280,7 @@ Re-running the bootstrap scripts is safe, also after an earlier onboarding: they
 Only offline commands run locally:
 
 ```bash
-terraform fmt -recursive && terraform init -backend=false && terraform validate && terraform test
+terraform fmt -recursive && (cd workspace_vending && terraform init -backend=false && terraform validate && terraform test)
 (cd tenant_settings && terraform init -backend=false && terraform validate && terraform test)
 for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done && bash tests/capacity-script.sh && bash tests/merge-workspaces.sh
 ```
@@ -301,27 +301,29 @@ pwsh scripts/check-alignment.ps1 -GroupPrefix "FABRIC_WORKSPACE" -WorkspaceNames
 | Script | Why | Usage |
 |---|---|---|
 | `scripts/check-storage-format.sh` | The Fabric provider does not manage per-dataset storage format (Large/Small); it is a Power BI REST setting. Inspect or fix one workspace. | `bash scripts/check-storage-format.sh <workspace_id> [--set-large\|--set-small]` |
-| `scripts/set-storage-format.sh` | Bulk version: reads `workspace_storage_formats` from Terraform and reconciles every vended workspace to its `default_storage_format`. For a pipeline step after the apply. | `bash scripts/set-storage-format.sh <tf_working_dir> [--dry-run] [--datasets]` |
+| `scripts/set-storage-format.sh` | Bulk version: reads `workspace_storage_formats` from Terraform and reconciles every vended workspace to its `default_storage_format`. For a pipeline step after the apply. | `bash scripts/set-storage-format.sh workspace_vending [--dry-run] [--datasets]` |
 | `scripts/merge-workspaces.sh` | Merges every `parameters/workspaces/*.tfvars` (not `examples/`) into one `workspaces` map. The pipelines run it. | `bash scripts/merge-workspaces.sh parameters/workspaces > merged_workspaces.auto.tfvars` |
 | `scripts/get-fabric-tenant-settings.ps1` | Exports the live tenant settings as tfvars, and with `-CheckPublishToWeb` lists reports that are publicly exposed. | `pwsh scripts/get-fabric-tenant-settings.ps1 -TenantId <tenant-id> [-UseAzCli] [-OutputTfvars] [-CheckPublishToWeb]` |
 
 ## File structure
 
 ```
-├── terraform.tf, providers.tf            # providers and their identities
-├── backend.tf                            # explains where the backend comes from (the pipelines)
-├── variables.tf, locals.tf, main.tf
-├── capacity.tf                           # the environment's capacity
-├── workspace.tf                          # workspaces, groups, role assignments, Git integration
-├── domains.tf                            # domains: created by the first environment, looked up by the others
-├── outputs.tf
+├── workspace_vending/                    # Terraform stack: capacities, workspaces, groups, domains (state per environment)
+│   ├── terraform.tf, providers.tf        # providers and their identities
+│   ├── backend.tf                        # explains where the backend comes from (the pipelines)
+│   ├── variables.tf, locals.tf, main.tf
+│   ├── capacity.tf                       # the environment's capacity
+│   ├── workspace.tf                      # workspaces, groups, role assignments, Git integration
+│   ├── domains.tf                        # domains: created by the first environment, looked up by the others
+│   ├── outputs.tf
+│   └── tests/                            # terraform test, mocked providers
+├── tenant_settings/                      # Terraform stack: tenant settings (one tenant-wide state)
 ├── azure-pipelines.yml                   # Azure DevOps: deploy
 ├── azure-pipelines-validate.yml          # Azure DevOps: offline checks (build policy)
 ├── azure-pipelines-tenant-settings.yml   # Azure DevOps: tenant settings
 ├── .azuredevops/                         # Azure DevOps stage and step templates
 ├── .github/                              # GitHub Actions workflows and the shared Terraform action
-├── tenant_settings/                      # separate stack and state for tenant settings
-├── tests/                                # offline tests (mocked providers, fake az)
+├── tests/                                # script tests (fake az)
 ├── parameters/
 │   ├── environments/                     # acc / prod (/ dev) .tfvars.example → copy to .tfvars
 │   ├── tenant-settings/                  # tenant-settings.tfvars.example → copy to .tfvars
