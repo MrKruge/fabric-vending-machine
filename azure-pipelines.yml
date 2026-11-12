@@ -7,7 +7,9 @@
 # pipeline once it has been created, and the bootstrap creates it.
 
 # batch: a push to main waits for the run in progress and then starts once, instead of two deploys
-# resuming (and, with capacity_auto_pause, pausing) the same capacity at the same time.
+# resuming (and, with capacity_auto_pause, pausing) the same capacity at the same time. A run waiting
+# for its prod approval is still in progress, so approve, reject or cancel it; the bootstrap gives the
+# approval one day to keep a forgotten one from blocking main.
 trigger:
   batch: true
   branches:

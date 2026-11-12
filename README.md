@@ -226,7 +226,7 @@ The tenant settings the service principal needs: `AllowServicePrincipalsUseReadA
 
 - **Graph permissions not granted.** The script grants them and reads them back. If it says they are missing, activate Global Administrator or Privileged Role Administrator and re-run it.
 - **Tenant settings refer to a deleted group** (an earlier onboarding was cleaned up). Fabric rejects any update that still names it; the script now drops deleted groups and says so.
-- **`AADSTS700213: No matching federated identity record`** in the first plan. A federated credential from an earlier onboarding (another project or repository) had the same name and a different subject. The scripts now compare the subject and replace such a credential; re-run `bootstrap-identity.ps1` (Azure DevOps) or `bootstrap-github.ps1`.
+- **`AADSTS700213: No matching federated identity record`** in the first plan. A federated credential from another onboarding (another project, organisation or repository) had the same name and a different subject. The scripts now look the subject up and, when the name is taken, add theirs under a unique name next to it; they never delete the other one, because the app is tenant-wide and another setup may still use it. Re-run `bootstrap-identity.ps1` (Azure DevOps) or `bootstrap-github.ps1`.
 - **Azure DevOps in another tenant than the subscription.** Pass `-AzdoAuthSubscriptionId` ([step 5a](#5a-azure-devops)). Do not pass `--tenant` to `az account get-access-token` yourself; it can fall back to a different signed-in account.
 - **Azure CLI cannot edit PIM eligibility** (`AADSTS65002`); do that in the Entra portal.
 
@@ -237,6 +237,7 @@ The tenant settings the service principal needs: `AllowServicePrincipalsUseReadA
 - **Pausing capacities to save cost** is opt-in: set `capacity_auto_pause = true` in an environment's tfvars and the pipeline pauses that capacity after every plan and apply, so it only bills while Terraform works. Workspaces on it are unavailable while it is paused. `scripts/capacity.sh` reads it.
 - **"Instance cannot be destroyed" for `fabric_domain.this[...]`.** Domains are protected from deletion. When no workspace uses a domain any more (removed, or `data_domain` renamed), keep its name in `domains` in `acc.tfvars` and the domain stays. To really delete one, do it in a pull request that drops the name and also takes `prevent_destroy` out of `workspace_vending/domains.tf` for that one change; put it back afterwards.
 - **Domain not assigned in a pull request plan for prod.** On a pull request both environments are planned side by side, so prod cannot find a domain that acc has not created yet and leaves the assignment out of that plan. After merging, prod is planned after acc applied and gets it.
+- **A merge to `main` does not start a deploy (Azure DevOps).** An earlier run is still waiting for its prod approval. With `batch: true` every later push to `main` waits until that run ends, and a waiting approval keeps it running. Approve, reject or cancel it, and the waiting push starts. New setups give the approval one day; one made by an older bootstrap may still wait 30 days, which the bootstrap warns about. Shorten it under Environments > `prod` > Approvals and checks.
 - **Fabric API calls from the CLI need MFA.** For ad hoc reads: `az login --tenant <tenant> --scope https://api.fabric.microsoft.com/.default`.
 
 ## Adding a DEV environment
@@ -273,7 +274,7 @@ Then set `create_capacity = true`, `capacity_sku = "F0"` and `capacity_name = "<
 
 ## Starting over in the same tenant
 
-Re-running the bootstrap scripts is safe, also after an earlier onboarding: they reuse what exists and repair stale federated credentials and deleted groups in tenant settings. To remove an onboarding completely, delete what it created: the resource groups `rg-fabricvending-capacity` and `rg-fabricvending-tfstate`, the app registration `sp-fabricvending-fabric`, the group `grp-fabricvending-spns`, the workspaces and their `FABRIC_WORKSPACE_*` groups, and the domains (Terraform protects domains from deletion on purpose). Then the service connections, variable groups and pipelines in Azure DevOps, or the variables and environments in GitHub.
+Re-running the bootstrap scripts is safe, also after an earlier onboarding or to move a setup to another subscription: they reuse what exists, point existing service connections at the current subscription and identity, add missing federated credentials without removing those of other setups that share the app, and repair deleted groups in tenant settings. Credentials of setups that no longer exist stay on the app until you remove them. To remove an onboarding completely, delete what it created: the resource groups `rg-fabricvending-capacity` and `rg-fabricvending-tfstate`, the app registration `sp-fabricvending-fabric`, the group `grp-fabricvending-spns`, the workspaces and their `FABRIC_WORKSPACE_*` groups, and the domains (Terraform protects domains from deletion on purpose). Then the service connections, variable groups and pipelines in Azure DevOps, or the variables and environments in GitHub.
 
 ## Local development
 
