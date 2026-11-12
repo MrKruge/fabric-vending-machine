@@ -13,8 +13,10 @@
     Run once, after bootstrap-backend.ps1 (and bootstrap-capacity.ps1 if you use F0). For Azure DevOps
     the project and its Git repository must exist and the code must be pushed first (the pipelines
     point at azure-pipelines.yml); pushing is safe, nothing runs until this script creates the pipelines.
-    Idempotent: safe to re-run, also after an earlier onboarding in the same tenant (stale federated
-    credentials and deleted groups in tenant settings are repaired). No secret is ever created: both
+    Idempotent: safe to re-run, also after an earlier onboarding in the same tenant or a move to another
+    subscription: existing service connections are pointed at the current subscription and identity,
+    federated credentials are added next to (never instead of) those of other setups sharing the app,
+    and deleted groups in tenant settings are repaired. No secret is ever created: both
     identities use federated credentials. Your default `az` subscription is restored at the end.
 
     Run it elevated: Global Administrator or Privileged Role Administrator (activate the role in PIM
@@ -353,6 +355,23 @@ function Ensure-ServiceConnection {
             })
         }
     }
+    else {
+        # An existing connection keeps its id (and so its federation subject, approvals and pipeline
+        # permissions), but may still point at an earlier subscription or identity, for example after
+        # moving the setup to a new subscription. Update it in place instead of leaving it stale.
+        $data  = Get-Prop $found "data"
+        $param = Get-Prop (Get-Prop $found "authorization") "parameters"
+        if ((Get-Prop $data "subscriptionId") -ne $SubscriptionId -or
+            (Get-Prop $param "serviceprincipalid") -ne $ClientId -or
+            (Get-Prop $param "tenantid") -ne $tenantId) {
+            Write-Host "Updating service connection $Name -> subscription $SubscriptionId, client id $ClientId"
+            $found.data.subscriptionId   = $SubscriptionId
+            $found.data.subscriptionName = $subName
+            $found.authorization.parameters.serviceprincipalid = $ClientId
+            $found.authorization.parameters.tenantid           = $tenantId
+            $found = Invoke-Azdo PUT "$base/_apis/serviceendpoint/endpoints/$($found.id)?api-version=7.1" $found
+        }
+    }
 
     $authParams = Get-Prop (Get-Prop $found "authorization") "parameters"
     $issuer  = Get-Prop $authParams "workloadIdentityFederationIssuer"
@@ -361,18 +380,20 @@ function Ensure-ServiceConnection {
         throw "Service connection '$Name' did not return a federation issuer/subject. Open it in Azure DevOps (Project settings > Service connections) and add the federated credential from its details manually, then re-run."
     }
 
-    # Matched on name AND subject: a credential left by an earlier onboarding (another project or
-    # organisation) has the same name but a different subject and would make every run fail with
-    # AADSTS700213. Such a credential is replaced.
+    # Matched on subject first: the credential may already exist under any name (Entra refuses a second
+    # credential with the same issuer and subject). The app is tenant-wide and can be shared by several
+    # setups (other projects or organisations) that use the same connection names, so a credential with
+    # our name but another subject is never deleted: it may still be live elsewhere. Ours is then added
+    # under a name made unique with the connection id. A credential whose connection no longer exists is
+    # harmless; remove it by hand when you are sure (Entra allows 20 per app).
     $credName = "azdo-$Name"
     if ($Kind -eq "app") {
-        $existing = Invoke-Az ad app federated-credential list --id $appObjectId --query "[?name=='$credName'] | [0]" -o json | ConvertFrom-Json
-        if ($existing -and ($existing.subject -ne $subject -or $existing.issuer -ne $issuer)) {
-            Write-Host "Federated credential on app $credName has subject $($existing.subject); replacing it with $subject"
-            Invoke-Az ad app federated-credential delete --id $appObjectId --federated-credential-id $existing.id --output none | Out-Null
-            $existing = $null
-        }
-        if (-not $existing) {
+        $creds = @(Invoke-Az ad app federated-credential list --id $appObjectId -o json | ConvertFrom-Json)
+        if (-not ($creds | Where-Object { $_.subject -eq $subject -and $_.issuer -eq $issuer })) {
+            if ($creds | Where-Object { $_.name -eq $credName }) {
+                $credName = "azdo-$Name-$($found.id.Substring(0, 8))"
+                Write-Warning "Federated credential azdo-$Name on the app has another subject (another setup, or an old one). Keeping it and adding $credName."
+            }
             Write-Host "Adding federated credential on app: $credName"
             $file = Write-JsonFile @{ name = $credName; issuer = $issuer; subject = $subject; audiences = @("api://AzureADTokenExchange") }
             try { Invoke-Az ad app federated-credential create --id $appObjectId --parameters "@$file" --output none | Out-Null }
@@ -407,7 +428,13 @@ $approverId = $me.authenticatedUser.id
 function Ensure-ApprovalCheck($AzEnv, [string] $Label) {
     $approvalType = "8c6f20a7-a545-4486-9777-f762fafe0d4d"
     $checks = Invoke-Azdo GET "$base/_apis/pipelines/checks/configurations?resourceType=environment&resourceId=$($AzEnv.id)&api-version=7.1-preview.1"
-    if ($checks.value | Where-Object { $_.type.id -eq $approvalType }) { return }
+    $existingCheck = $checks.value | Where-Object { $_.type.id -eq $approvalType } | Select-Object -First 1
+    if ($existingCheck) {
+        if ($existingCheck.timeout -gt 1440) {
+            Write-Warning "The approval on $($AzEnv.name) waits $($existingCheck.timeout) minutes. A run waiting there blocks every later push to main; consider 1 day (Environments > $($AzEnv.name) > Approvals and checks)."
+        }
+        return
+    }
     Write-Host "Adding approval check on $($AzEnv.name) (approver: $($me.authenticatedUser.providerDisplayName))"
     Invoke-Azdo POST "$base/_apis/pipelines/checks/configurations?api-version=7.1-preview.1" @{
         type     = @{ id = $approvalType; name = "Approval" }
@@ -419,7 +446,10 @@ function Ensure-ApprovalCheck($AzEnv, [string] $Label) {
             requesterCannotBeApprover = $false
         }
         resource = @{ type = "environment"; id = "$($AzEnv.id)" }
-        timeout  = 43200
+        # One day, not the 30-day default: a run waiting here counts as in progress, and with `batch: true`
+        # every later push to main waits behind it. An expired approval only fails this run's prod stage;
+        # the next push to main plans and asks again.
+        timeout  = 1440
     } | Out-Null
 }
 

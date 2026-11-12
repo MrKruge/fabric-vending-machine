@@ -119,17 +119,24 @@ $subjects = [ordered]@{
 }
 foreach ($e in (@($Environments) + $GlobalScope)) { $subjects["gh-env-$e"] = "${prefix}:environment:$e" }
 
-# Matched on name AND subject: a credential with this name from an earlier onboarding of another
-# repository has a different subject and is replaced, otherwise every run fails with AADSTS700213.
+# Matched on subject first: the credential may already exist under any name (Entra refuses a second
+# credential with the same issuer and subject). The app is tenant-wide and can be shared by several
+# setups (other repositories, or Azure DevOps) that use the same credential names, so a credential
+# with our name but another subject is never deleted: it may still be live elsewhere. Ours is then
+# added under a name made unique with a hash of the subject. Remove credentials of setups that no
+# longer exist by hand (Entra allows 20 per app).
 function Ensure-Credential {
     param([string] $Kind, [string] $Name, [string] $Subject)
     if ($Kind -eq "app") {
-        $existing = Invoke-Az ad app federated-credential list --id $appObjectId --query "[?name=='$Name'] | [0]" -o json | ConvertFrom-Json
-        if ($existing -and $existing.subject -eq $Subject -and $existing.issuer -eq $issuer) { Write-Host "  exists (app)      $Name"; return }
-        if ($existing) {
-            Step "replace credential on app    $Name ($($existing.subject) -> $Subject)"
-            if (-not $DryRun) { Invoke-Az ad app federated-credential delete --id $appObjectId --federated-credential-id $existing.id --output none | Out-Null }
-        } else { Step "add credential on app        $Name -> $Subject" }
+        $creds = @(Invoke-Az ad app federated-credential list --id $appObjectId -o json | ConvertFrom-Json)
+        $same = $creds | Where-Object { $_.subject -eq $Subject -and $_.issuer -eq $issuer } | Select-Object -First 1
+        if ($same) { Write-Host "  exists (app)      $($same.name)"; return }
+        if ($creds | Where-Object { $_.name -eq $Name }) {
+            $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Subject))).Substring(0, 8).ToLower()
+            Write-Warning "Credential $Name on the app has another subject (another setup, or an old one). Keeping it and adding $Name-$hash."
+            $Name = "$Name-$hash"
+        }
+        Step "add credential on app        $Name -> $Subject"
         if ($DryRun) { return }
         $file = New-TemporaryFile
         try {
