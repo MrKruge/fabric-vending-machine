@@ -37,11 +37,13 @@
     DevOps token; nothing is created in it. The organisation's tenant is shown in Azure DevOps under
     Organization settings > Microsoft Entra.
 
-    Grants the service principal the Graph application permissions Terraform needs (Group.ReadWrite.All,
-    Directory.ReadWrite.All) and reads them back, gives it the Entra role Fabric Administrator, and
-    enables the Fabric tenant settings it needs (read/write admin APIs and workspace creation) for the
-    SPN security group. Together that is close to tenant-admin for whoever can run the pipeline on main:
-    protect main and the prod/global environments.
+    Grants the service principal the Graph application permissions Terraform needs (Group.Create,
+    Group.Read.All, User.Read.All; it manages only the groups it created and owns) and reads them back,
+    removes the broader Group.ReadWrite.All / Directory.ReadWrite.All older versions granted, gives it the
+    Entra role Fabric Administrator, and enables the Fabric tenant settings it needs (read/write admin
+    APIs and workspace creation) for the SPN security group. Whoever can run the pipeline on main is
+    therefore Fabric administrator of the whole tenant, but cannot change Entra groups the pipeline did
+    not create: protect main and the prod/global environments accordingly.
 
 .EXAMPLE
     pwsh scripts/bootstrap-identity.ps1 -SubscriptionId <sub> -Location swedencentral `
@@ -209,7 +211,12 @@ Invoke-Az role assignment create --assignee-object-id $spObjectId --assignee-pri
 $graphAppId = "00000003-0000-0000-c000-000000000000"
 $graphSpId  = Invoke-Az ad sp show --id $graphAppId --query id -o tsv
 $wantedRoles = [ordered]@{}
-foreach ($perm in "Group.ReadWrite.All", "Directory.ReadWrite.All") {
+# Least privilege: Terraform creates the workspace groups (Group.Create) with the service principal as their
+# owner, and an owning app may manage and delete its own groups with Group.Create alone. It only reads other
+# groups and users (Group.Read.All, User.Read.All). So code that reaches main cannot change any group the
+# pipeline did not create, for example groups that grant Azure or other access in the tenant.
+$legacyRoles = "Group.ReadWrite.All", "Directory.ReadWrite.All"   # granted by older versions, removed below
+foreach ($perm in "Group.Create", "Group.Read.All", "User.Read.All") {
     $roleId = Invoke-Az ad sp show --id $graphAppId --query "appRoles[?value=='$perm'].id | [0]" -o tsv
     $wantedRoles[$perm] = $roleId
     # Recorded on the app as well, so the portal shows the permissions as configured.
@@ -250,6 +257,20 @@ if ($consented) {
         if (-not $missing) { break }
     }
     if ($missing) { $consented = $false; Write-Host "Graph permissions not visible after retries: $($missing -join ', ')" }
+}
+if ($consented) {
+    # Only once the narrow permissions are confirmed: remove the broad ones older versions granted.
+    $assignments = @(& az rest --method get --url "https://graph.microsoft.com/v1.0/servicePrincipals/$spObjectId/appRoleAssignments" `
+        --query "value[?resourceId=='$graphSpId'].{id:id, role:appRoleId}" -o json 2>$null | ConvertFrom-Json)
+    foreach ($perm in $legacyRoles) {
+        $roleId = Invoke-Az ad sp show --id $graphAppId --query "appRoles[?value=='$perm'].id | [0]" -o tsv
+        foreach ($a in @($assignments | Where-Object { $_.role -eq $roleId })) {
+            Write-Host "Removing broad Graph permission $perm from the service principal (no longer needed)"
+            & az rest --method delete --url "https://graph.microsoft.com/v1.0/servicePrincipals/$spObjectId/appRoleAssignments/$($a.id)" --output none 2>$null
+            if ($LASTEXITCODE -ne 0) { Write-Warning "Could not remove $perm; remove it by hand (Enterprise applications > $AppName > Permissions)." }
+        }
+        & az ad app permission delete --id $appId --api $graphAppId --api-permissions $roleId --output none 2>$null | Out-Null
+    }
 }
 
 # 5. Security group for the Fabric tenant setting "Service principals can use Fabric APIs"
@@ -568,7 +589,7 @@ if ($Platform -eq "azuredevops") {
 
 $todo = @()
 if (-not $consented) {
-    $todo += "Graph permissions (Group.ReadWrite.All, Directory.ReadWrite.All) are not granted. Activate Global Administrator or Privileged Role Administrator (PIM) and re-run this script."
+    $todo += "Graph permissions (Group.Create, Group.Read.All, User.Read.All) are not granted. Activate Global Administrator or Privileged Role Administrator (PIM) and re-run this script."
 }
 if (-not $fabricAdminAssigned) {
     $todo += "The Entra role 'Fabric Administrator' is not assigned to '$AppName'. Activate Global Administrator or Privileged Role Administrator and re-run this script."
