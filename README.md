@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/fabric-vending-logo-640.png" alt="Fabric Vending Machine logo: a glowing hexagon around an F with a cowboy hat, next to a V" width="260">
+  <img src="assets/fabricVendinglogo.jpeg" alt="Fabric Vending logo: a glowing teal hexagon with the letters FV, the F wearing a white cowboy hat" width="260">
 </p>
 
 <h1 align="center">Fabric Vending Machine</h1>
